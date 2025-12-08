@@ -1,0 +1,34 @@
+# configs/config.yaml
+
+project_name: "midigen"
+
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+data:
+  # 데이터 경로 (상대 경로 주의)
+  raw_path: "${hydra:runtime.cwd}/data/raw/maestro-v3.0.0" 
+  csv_path: "${hydra:runtime.cwd}/data/raw/maestro-v3.0.0/maestro-v3.0.0.csv"
+  processed_path: "${hydra:runtime.cwd}/data/processed/maestro_tokenized"
+  
+  # 토크나이저 설정
+  max_seq_len: 1024
+  vocab_size: 3000
+  num_velocities: 32
+  use_chords: true
+
+model:
+  type: "gpt2" # 나중에 'titan'으로 변경
+  dim: 512
+  depth: 6
+  heads: 8
+
+train:
+  batch_size: 8
+  epochs: 10
+  lr: 3e-4
+  force_preprocess: false # true로 하면 캐시 삭제 후 다시 전처리

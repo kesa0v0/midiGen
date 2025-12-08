@@ -1,0 +1,20 @@
+services:
+  midigen:
+    build: .
+    container_name: midigen
+    # 현재 폴더를 컨테이너의 /workspace에 마운트 (코드 수정 시 바로 반영됨)
+    volumes:
+      - .:/workspace
+    # GPU 활성화 (Windows Docker Desktop 기준)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # 터미널을 계속 열어두기 위한 설정
+    stdin_open: true 
+    tty: true
+    # 공유 메모리 크기 증가 (PyTorch DataLoader 사용 시 필수)
+    shm_size: '8gb'
