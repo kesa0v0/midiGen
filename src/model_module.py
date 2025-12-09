@@ -2,7 +2,7 @@ import pytorch_lightning as pl
 import torch
 from torch.optim import AdamW
 from transformers import GPT2Config, GPT2LMHeadModel
-from miditok import REMI
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 class MidiGenModule(pl.LightningModule):
     def __init__(self, cfg):
@@ -18,12 +18,18 @@ class MidiGenModule(pl.LightningModule):
                 n_embd=cfg.model.dim,
                 n_layer=cfg.model.depth,
                 n_head=cfg.model.heads,
-                pad_token_id=0
+                pad_token_id=0,
+                attn_implementation="flash_attention_2"
             )
             self.model = GPT2LMHeadModel(config)
         else:
             # Titans 등 다른 모델 확장 가능
             raise NotImplementedError("GPT2 외 모델은 아직 미구현")
+        
+        try:
+            self.model = torch.compile(self.model)
+        except Exception as e:
+            print(f"!! torch.compile 실패 (무시하고 진행합니다): {e}")
 
     def forward(self, input_ids):
         return self.model(input_ids, labels=input_ids)
@@ -45,4 +51,23 @@ class MidiGenModule(pl.LightningModule):
 
     # 4. 옵티마이저 설정
     def configure_optimizers(self):
-        return AdamW(self.parameters(), lr=self.cfg.train.lr)
+        # 1. 옵티마이저 설정 (AdamW 추천)
+        optimizer = AdamW(self.parameters(), lr=self.cfg.train.lr)
+        
+        # 2. 스케줄러 설정 (Cosine Annealing)
+        # T_max: 보통 전체 에폭(epochs) 수로 설정합니다.
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=self.cfg.train.epochs, 
+            eta_min=1e-6  # 학습률이 0이 되지 않도록 최소값 설정
+        )
+        
+        # 3. Lightning에 전달할 설정 딕셔너리 반환
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",  # 에폭 단위로 스케줄러 실행 (step으로 하려면 "step")
+                "monitor": "val_loss" # ReduceLROnPlateau 같은 거 쓸 때 필요
+            }
+        }

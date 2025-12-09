@@ -219,3 +219,5 @@ wandb/
 # 4. OS 관련 (혹시 몰라 추가)
 .DS_Store
 Thumbs.db
+
+lightning_logs/

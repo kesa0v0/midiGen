@@ -9,3 +9,4 @@ transformers
 titans-pytorch
 accelerate
 pytorch-lightning
+flash-attn

@@ -103,6 +103,7 @@ class MidiDataModule(pl.LightningDataModule):
             shuffle=True, 
             collate_fn=self.collate_fn,
             num_workers=4,
+            persistent_workers=True,
             pin_memory=True
         )
 
