@@ -26,10 +26,12 @@ class MidiGenModule(pl.LightningModule):
             # Titans 등 다른 모델 확장 가능
             raise NotImplementedError("GPT2 외 모델은 아직 미구현")
         
-        try:
-            self.model = torch.compile(self.model)
-        except Exception as e:
-            print(f"!! torch.compile 실패 (무시하고 진행합니다): {e}")
+        compile_model = getattr(cfg, "compile_model", False)
+        if compile_model:
+            try:
+                self.model = torch.compile(self.model)
+            except Exception as e:
+                print(f"!! torch.compile 실패 (무시하고 진행합니다): {e}")
 
     def forward(self, input_ids):
         return self.model(input_ids, labels=input_ids)

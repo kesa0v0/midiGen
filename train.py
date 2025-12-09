@@ -5,6 +5,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from src.model_module import MidiGenModule
 from src.data_module import MidiDataModule
 import torch
+import os
 
 # Tensor Core 활용 (속도 향상)
 torch.set_float32_matmul_precision('medium')
@@ -36,6 +37,18 @@ def main(cfg: DictConfig):
     )
 
     # 5. 트레이너 설정
+    # 체크포인트 이어서 학습 경로 결정
+    resume_ckpt = None
+    ckpt_path_cfg = getattr(cfg.train, "resume_ckpt_path", "")
+    if ckpt_path_cfg == "auto":
+        from pathlib import Path
+        ckpts = sorted(Path("checkpoints").glob("*.ckpt"), key=os.path.getmtime)
+        if ckpts:
+            resume_ckpt = str(ckpts[-1])
+    elif ckpt_path_cfg:
+        resume_ckpt = ckpt_path_cfg
+    # 비워놓으면 None → 처음부터
+
     trainer = pl.Trainer(
         max_epochs=cfg.train.epochs,
         accelerator="auto",
@@ -46,7 +59,10 @@ def main(cfg: DictConfig):
     )
 
     # 6. 학습 시작
-    trainer.fit(model, data_module)
+    if resume_ckpt:
+        trainer.fit(model, data_module, ckpt_path=resume_ckpt)
+    else:
+        trainer.fit(model, data_module)
 
 if __name__ == "__main__":
     main()

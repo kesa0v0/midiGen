@@ -16,7 +16,7 @@ data:
   processed_path: "${hydra:runtime.cwd}/data/processed/maestro_tokenized"
   
   # 토크나이저 설정
-  max_seq_len: 512
+  max_seq_len: 1024
   vocab_size: 500
   num_velocities: 24
   use_chords: true
@@ -28,11 +28,14 @@ data:
 model:
   type: "gpt2"  # "gpt2" 또는 "titan"
   dim: 512
-  depth: 12
+  depth: 24
   heads: 8
 
 train:
-  batch_size: 32
-  epochs: 30
+  batch_size: 16
+  epochs: 50
   lr: 3e-4
   force_preprocess: false # true로 하면 캐시 삭제 후 다시 전처리
+  resume_ckpt_path: "auto"  # "auto"면 최신 체크포인트, 비우면 처음부터
+
+compile_model: true

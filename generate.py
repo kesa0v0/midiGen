@@ -51,7 +51,26 @@ def main(cfg: DictConfig):
     print(f">> 로드 중: {ckpt_path}")
 
     # 모델 구조 + 가중치 자동 복구
-    model_module = MidiGenModule.load_from_checkpoint(ckpt_path, cfg=cfg)
+    # model_module = MidiGenModule.load_from_checkpoint(ckpt_path, cfg=cfg)
+    cfg.compile_model = False  # 생성 시에는 컴파일 비활성화
+    model_module = MidiGenModule(cfg)
+
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = checkpoint["state_dict"]
+
+    # 키 이름 변경 ('model._orig_mod.' -> 'model.')
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace("model._orig_mod.", "model.") # 컴파일된 접두사 제거
+        new_state_dict[new_key] = v
+        
+    # 수정된 가중치 로드
+    model_module.load_state_dict(new_state_dict)
+    
+    # [수정] 모델을 bfloat16으로 변환 (Flash Attention 2 필수 조건!)
+    # 4070 Ti Super는 bfloat16을 지원하므로 안심하고 쓰셔도 됩니다.
+    model_module.model.to(dtype=torch.bfloat16) 
+    
     model_module.to(device)
     model_module.eval()
     
@@ -67,10 +86,12 @@ def main(cfg: DictConfig):
     with torch.no_grad():
         generated_ids = model.generate(
             input_ids=torch.tensor([seed_ids]).to(device),
-            max_length=1024,
+            max_length=512,
             do_sample=True,
-            temperature=0.9,       # 창의성
-            top_k=20,              # 안정성
+            temperature=0.95,       # 창의성
+            # [추가] Nucleus Sampling (상위 90% 확률 질량 내에서 선택)
+            top_p=0.9,             
+            top_k=40,              # top_k도 같이 써서 안전장치 마련
             repetition_penalty=1.0,
             pad_token_id=0
         )
