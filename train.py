@@ -7,6 +7,7 @@ from datasets import load_from_disk
 import os
 from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
+from src.models import MidigenTitans
 
 # 배치 내의 길이를 맞춰주는 함수 (Padding)
 def collate_fn(batch):
@@ -57,8 +58,11 @@ def main(cfg: DictConfig):
             pad_token_id=0  # 패딩 토큰 ID
         )
         model = GPT2LMHeadModel(model_config).to(device)
+    elif cfg.model.type == "titan":
+        print(f">> Titans 모델을 로드합니다! (Chunk Size: {cfg.model.titan.chunk_size})")
+        model = MidigenTitans(cfg).to(device)
     else:
-        raise ValueError(f"아직 지원하지 않는 모델 타입입니다: {cfg.model.type}")
+        raise ValueError(f"지원하지 않는 모델: {cfg.model.type}")
 
     print(f">> 모델 생성 완료. 파라미터 수: {sum(p.numel() for p in model.parameters()):,}")
 

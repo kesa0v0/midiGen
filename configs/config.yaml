@@ -1,6 +1,6 @@
 # configs/config.yaml
 
-project_name: "midigen"
+project_name: "midigen_v2"
 
 defaults:
   - _self_
@@ -17,18 +17,25 @@ data:
   
   # 토크나이저 설정
   max_seq_len: 1024
-  vocab_size: 300
-  num_velocities: 32
+  vocab_size: 360
+  num_velocities: 24
   use_chords: true
 
+  # 박자 쪼개기 설정 (비트를 4개로만 쪼갬 -> 16분음표 단위)
+  # 숫자가 작을수록 AI가 박자를 잡기 쉬워집니다.
+  beat_res: "{(0, 4): 8, (4, 12): 4}"
+
 model:
-  type: "gpt2" # 나중에 'titan'으로 변경
-  dim: 512
-  depth: 6
-  heads: 8
+  type: "titan"  # "gpt2" 또는 "titan"
+  dim: 1024       # Titans는 메모리 효율이 좋지만, 실험용으로 조금 줄여서 시작 추천
+  depth: 24       # Titans 레이어 깊이 (NeuralMemory 내부에서 처리되거나, Stack 가능)
+  heads: 16
+
+  titan:
+    chunk_size: 64  # 1024 토큰을 64개씩 묶어서 기억함
 
 train:
   batch_size: 8
-  epochs: 10
+  epochs: 30
   lr: 3e-4
   force_preprocess: false # true로 하면 캐시 삭제 후 다시 전처리
