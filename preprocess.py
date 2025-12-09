@@ -31,6 +31,17 @@ def main(cfg: DictConfig):
         beat_res=beat_res_dict
     )
     tokenizer = REMI(tokenizer_config)
+
+    # [추가됨] BPE 학습: 화음과 패턴을 단어장으로 만듦
+    print(">> BPE 학습 시작 (데이터 양에 따라 시간 소요됨)...")
+    midi_paths = df['full_path'].tolist()
+    
+    # # vocab_size를 5000 정도로 설정 (화성학 패턴을 충분히 담음)
+    # tokenizer.train(vocab_size=5000, files_paths=midi_paths)
+    
+    # # [중요] 학습된 토크나이저 저장 (generate.py에서 쓰기 위해)
+    # tokenizer.save_params("tokenizer.json") 
+    # print(">> tokenizer.json 저장 완료")
     
     base_vocab_size = len(tokenizer)
     print(f">> 기본 MIDI Vocab Size: {base_vocab_size}")

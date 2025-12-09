@@ -8,3 +8,4 @@ pandas
 transformers
 titans-pytorch
 accelerate
+pytorch-lightning
