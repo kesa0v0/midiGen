@@ -42,7 +42,7 @@ train:
   batch_size: 8
   epochs: 50
   lr: 3e-4
-  force_preprocess: false # true로 하면 캐시 삭제 후 다시 전처리
+  force_preprocess: true # true로 하면 캐시 삭제 후 다시 전처리
   resume_ckpt_path: "auto"  # "auto"면 최신 체크포인트, 비우면 처음부터
 
 compile_model: true

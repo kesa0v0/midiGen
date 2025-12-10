@@ -201,6 +201,10 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
 
     def encode(self, midi_path: Path) -> list:
         """MIDI -> Structured Tokens (Header + Anchors + Stream)"""
+        # Ensure midi_path is a Path object
+        if isinstance(midi_path, str):
+            midi_path = Path(midi_path)
+
         if not midi_path.exists():
             log.error(f"MIDI file not found: {midi_path}")
             return []
