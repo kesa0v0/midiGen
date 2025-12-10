@@ -32,8 +32,11 @@ def main(cfg: DictConfig):
     model = MidiGenModule(cfg, vocab_size=actual_vocab_size)
 
     # 4. 콜백 설정
+    checkpoint_dir = os.path.join("checkpoints", cfg.project_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints",
+        dirpath=checkpoint_dir,
         filename="midigen-{epoch:02d}-{val_loss:.2f}",
         save_top_k=2,       # 가장 좋은 모델 2개만 저장
         monitor="val_loss",
@@ -52,7 +55,7 @@ def main(cfg: DictConfig):
     ckpt_path_cfg = getattr(cfg.train, "resume_ckpt_path", "")
     if ckpt_path_cfg == "auto":
         from pathlib import Path
-        ckpts = sorted(Path("checkpoints").glob("*.ckpt"), key=os.path.getmtime)
+        ckpts = sorted(Path(checkpoint_dir).glob("*.ckpt"), key=os.path.getmtime)
         if ckpts:
             resume_ckpt = str(ckpts[-1])
     elif ckpt_path_cfg:
@@ -65,7 +68,8 @@ def main(cfg: DictConfig):
         devices="auto",
         callbacks=[checkpoint_callback, early_stop_callback],
         precision="16-mixed",  # 혼합 정밀도 (메모리 절약 + 속도 UP)
-        log_every_n_steps=10
+        log_every_n_steps=10,
+        benchmark=True # CUDNN 최적화 활성화 (속도 향상)
     )
 
     # 6. 학습 시작

@@ -110,21 +110,26 @@ class MidiDataModule(pl.LightningDataModule):
         padded = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
         return padded
 
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_ds,
-            batch_size=self.cfg.train.batch_size,
-            shuffle=True,
-            collate_fn=self.collate_fn,
-            num_workers=4,
-            persistent_workers=True,
-            pin_memory=True
-        )
-
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_ds,
-            batch_size=self.cfg.train.batch_size,
-            collate_fn=self.collate_fn,
-            num_workers=2
-        )
+        def train_dataloader(self):
+            # CPU 코어 수 기반으로 워커 수 자동 설정 (최대 8개)
+            num_workers = min(os.cpu_count() // 2, 8) if os.cpu_count() else 4
+            
+            return DataLoader(
+                self.train_ds, 
+                batch_size=self.cfg.train.batch_size, 
+                shuffle=True, 
+                collate_fn=self.collate_fn,
+                num_workers=num_workers,
+                persistent_workers=True, # 워커 프로세스 유지 (오버헤드 감소)
+                pin_memory=True
+            )
+    
+        def val_dataloader(self):
+            num_workers = min(os.cpu_count() // 2, 4) if os.cpu_count() else 2
+            return DataLoader(
+                self.val_ds, 
+                batch_size=self.cfg.train.batch_size, 
+                collate_fn=self.collate_fn,
+                num_workers=num_workers,
+                persistent_workers=True # 검증도 유지하면 좋음
+            )

@@ -114,53 +114,130 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
     def __init__(self, config: omegaconf.DictConfig):
         self.config = config
         
-        # --- 1. Special Tokens 설정 (0~99번 예약) ---
+        # --- 1. Basic Special Tokens (0-9) ---
         self._pad_token_id = 0
         self._bos_token_id = 1
         self._eos_token_id = 2
         self._unk_token_id = 3
         self._mask_token_id = 4
         
-        # 커스텀 메타데이터 토큰 (앞서 논의한 Context/Composer)
+        # --- 2. Structural & Semantic Special Tokens (10-99) ---
+        # Structure Headers
+        self.tokens_structure = {
+            'Global_Header': 10,
+            'Memory_Anchors': 11,
+            'Narrative_Stream': 12,
+        }
+        
+        # Metadata keys/values (Simplified placeholders)
+        self.tokens_meta = {
+            'Genre_Fantasy_Orchestral': 20,
+            'Composer_Hans_Zimmer_Style': 21,
+            'Composer_Chopin': 22,
+            'BPM_Variable': 23,
+        }
+        
+        # Anchor Definitions
+        self.tokens_anchor = {
+            'Define_Motif_A': 30,
+            'Define_Motif_B': 31,
+            'End_Motif': 32,
+        }
+        
+        # Narrative Contexts
+        self.tokens_context = {
+            'Context_Peaceful_Village': 40,
+            'Context_Battle': 41,
+            'Context_Tragic_Loss': 42,
+            'Event_Surprise_Attack': 43,
+            'Intensity_Low': 44,
+            'Intensity_High': 45,
+            'Intensity_Medium': 46,
+        }
+
+        # Offset for AMT tokens (0-99 reserved for special tokens)
         self.special_token_offset = 100 
 
-        # --- 2. AMT Vocabulary 설정 ---
+        # --- 3. AMT Vocabulary Setting ---
         # Based on snippet: AMT_GPT2_BOS_ID = 55026
         # This implies the valid token range for AMT is roughly 0 to 55025.
         self._base_amt_vocab_size = 55026
         self.amt_vocab_start = self.special_token_offset 
-        self._vocab_size = self.amt_vocab_start + self._base_amt_vocab_size
-
+        
+        # Calculate raw vocab size
+        raw_vocab_size = self.amt_vocab_start + self._base_amt_vocab_size
+        
+        # Optimization: Pad vocab size to be a multiple of 128 (Tensor Core friendly)
+        # 55126 -> 55168 (adds ~42 dummy tokens)
+        alignment = 128
+        self._vocab_size = ((raw_vocab_size + alignment - 1) // alignment) * alignment
+        
         log.info(f"Initialized Anticipation Tokenizer.")
-        log.info(f"Total Vocab Size: {self._vocab_size} (Special: {self.special_token_offset} + AMT: {self._base_amt_vocab_size})")
+        log.info(f"Raw Vocab Size: {raw_vocab_size} -> Aligned Vocab Size: {self._vocab_size} (Multiple of {alignment})")
+
+    def _generate_dummy_metadata_tokens(self) -> list:
+        """Generates a structured header with dummy metadata."""
+        # [Global_Header]
+        #    [Genre: Fantasy_Orchestral]
+        #    [Composer: Hans_Zimmer_Style] (Dummy, normally inferred)
+        #    [BPM: Variable]
+        header = [
+            self.tokens_structure['Global_Header'],
+            self.tokens_meta['Genre_Fantasy_Orchestral'],
+            self.tokens_meta['Composer_Hans_Zimmer_Style'],
+            self.tokens_meta['BPM_Variable']
+        ]
+        
+        # [Memory_Anchors] (Dummy empty definitions for now)
+        #    [Define_Motif_A] ... [End_Motif]
+        # In future, we can extract main themes from the midi and put them here
+        anchors = [
+            self.tokens_structure['Memory_Anchors'],
+            self.tokens_anchor['Define_Motif_A'],
+            self.tokens_anchor['End_Motif']
+        ]
+        
+        return header + anchors
 
     def encode(self, midi_path: Path) -> list:
-        """MIDI -> Events -> Tokens"""
+        """MIDI -> Structured Tokens (Header + Anchors + Stream)"""
         if not midi_path.exists():
             log.error(f"MIDI file not found: {midi_path}")
             return []
 
         if not _ANTICIPATION_AVAILABLE:
             log.warning(f"Anticipation library not available. Returning dummy tokens for {midi_path.name}")
-            return [self.start_token_id, 101, 102, 103, self.bar_token_id, 104, self.eos_token_id, self.pad_token_id] * 5 # Dummy
+            return [self.start_token_id, 101, 102, 103, self.bar_token_id, 104, self.eos_token_id, self.pad_token_id] * 5 
 
         try:
-            # 1. MIDI -> Events (Tokens)
-            # midi_to_events returns a list of integer tokens
+            # 1. MIDI -> AMT Events (Tokens)
             events = midi_to_events(str(midi_path))
-            
-            # 2. Shift tokens by offset
+            # Shift tokens by offset
             amt_tokens = [t + self.amt_vocab_start for t in events]
-
-            # 3. Add BOS/EOS
-            return [self._bos_token_id] + amt_tokens + [self._eos_token_id]
+            
+            # 2. Construct Structured Sequence
+            # [BOS]
+            # [Global_Header] ... [Memory_Anchors] ... (Dummy Meta)
+            # [Narrative_Stream]
+            #    [Context: Peaceful_Village] (Default Context)
+            #    [MIDI_Tokens...]
+            # [EOS]
+            
+            structure_prefix = self._generate_dummy_metadata_tokens()
+            stream_start = [
+                self.tokens_structure['Narrative_Stream'],
+                self.tokens_context['Context_Peaceful_Village'], # Default context for now
+                self.tokens_context['Intensity_Medium']
+            ]
+            
+            return [self._bos_token_id] + structure_prefix + stream_start + amt_tokens + [self._eos_token_id]
 
         except Exception as e:
             log.error(f"Failed to encode {midi_path}: {e}")
             return []
 
     def decode(self, tokens: list, output_path: Path):
-        """Tokens -> Events -> MIDI"""
+        """Tokens -> Filter Structural Tokens -> Events -> MIDI"""
         if not _ANTICIPATION_AVAILABLE:
             log.warning(f"Anticipation library not available. Generating dummy MIDI for {output_path.name}")
             midi = MIDIFile(1)
@@ -182,19 +259,17 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
 
 
         try:
-            # 1. Filter and Shift back
-            valid_tokens = [
-                t - self.amt_vocab_start
-                for t in tokens
-                if self.amt_vocab_start <= t < (self.amt_vocab_start + self._base_amt_vocab_size)
-            ]
+            # 1. Filter out all Special Tokens (0-99) and shift back AMT tokens
+            valid_tokens = []
+            for t in tokens:
+                if self.amt_vocab_start <= t < (self.amt_vocab_start + self._base_amt_vocab_size):
+                    valid_tokens.append(t - self.amt_vocab_start)
             
             if not valid_tokens:
                 log.warning("No valid AMT tokens found to decode.")
                 return
 
             # 2. Tokens -> MIDI
-            # events_to_midi returns a miditoolkit/mido object with a .save method
             midi_obj = events_to_midi(valid_tokens)
             midi_obj.save(str(output_path))
             

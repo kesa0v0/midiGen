@@ -58,18 +58,25 @@ def main(cfg: DictConfig):
 
 
     # 3. 모델 로드
-    # checkpoints 폴더에서 가장 최신 .ckpt 파일을 찾음
-    ckpts = sorted(Path("checkpoints").glob("*.ckpt"), key=os.path.getmtime)
+    # checkpoints/{project_name} 폴더에서 가장 최신 .ckpt 파일을 찾음
+    ckpt_dir = Path("checkpoints") / cfg.project_name
+    if not ckpt_dir.exists():
+        log.error(f"!! 체크포인트 디렉토리가 없습니다: {ckpt_dir}")
+        return
+
+    ckpts = sorted(ckpt_dir.glob("*.ckpt"), key=os.path.getmtime)
     if not ckpts:
-        log.error("!! 체크포인트(.ckpt)가 없습니다. 먼저 train.py를 실행하세요.")
+        log.error(f"!! '{ckpt_dir}'에 체크포인트(.ckpt)가 없습니다. 먼저 train.py를 실행하세요.")
         return
     
     ckpt_path = str(ckpts[-1])
-    log.info(f">> 로드 중: {ckpt_path}")
+    log.info(f">> 로드 중: {ckpt_dir} -> {ckpt_path}")
 
     # 모델 구조 + 가중치 자동 복구
     cfg.compile_model = False  # 생성 시에는 컴파일 비활성화
-    model_module = MidiGenModule(cfg)
+    # Load correct vocab size from tokenizer
+    vocab_size = tokenizer.vocab_size
+    model_module = MidiGenModule(cfg, vocab_size=vocab_size)
 
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = checkpoint["state_dict"]
@@ -143,8 +150,9 @@ def main(cfg: DictConfig):
     # This might be important if composer_token_id or other special tokens are handled outside the tokenizer's core vocab.
     final_midi_ids = [t for t in full_generated_sequence if t < tokenizer.vocab_size]
 
-    os.makedirs("generated_output", exist_ok=True)
-    save_path = os.path.join("generated_output", f"output_{target_composer.replace(' ', '_')}_long.mid")
+    output_dir = Path("generated_output") / cfg.project_name
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = output_dir / f"output_{target_composer.replace(' ', '_')}_long.mid"
     
     # Use the abstracted tokenizer's decode method
     tokenizer.decode(final_midi_ids, Path(save_path))

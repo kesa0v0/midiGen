@@ -1,6 +1,6 @@
 # configs/config.yaml
 
-project_name: "midigen_v2"
+project_name: "midigen_v4_anticipation_gpt2"
 
 defaults:
   - _self_
@@ -16,8 +16,8 @@ data:
   processed_path: "${hydra:runtime.cwd}/data/processed/maestro_tokenized"
 
 tokenizer:
-  name: remi # or anticipation
-  max_seq_len: 1024 # Moved from data config, common for both tokenizers
+  name: anticipation # remi or anticipation
+  max_seq_len: 2048 # Moved from data config, common for both tokenizers
   remi:
     beat_res: "{(0, 4): 8, (4, 12): 4}" # Beat resolution for miditok
     nb_velocities: 24 # Number of velocity bins, renamed from num_velocities
@@ -30,8 +30,7 @@ tokenizer:
     tempo_range: "[50, 200]" # Defaulting to common range
     use_program_changes: False # Defaulting to false
   anticipation:
-    # TODO: Add specific configurations for anticipation tokenizer here
-    dummy_param: 1 # Placeholder for future anticipation tokenizer config
+    bar_token_id: 50 # Default bar token ID for anticipation tokenizer.
 
 model:
   type: "gpt2"  # "gpt2" 또는 "titan"
@@ -40,7 +39,7 @@ model:
   heads: 8
 
 train:
-  batch_size: 16
+  batch_size: 8
   epochs: 50
   lr: 3e-4
   force_preprocess: false # true로 하면 캐시 삭제 후 다시 전처리
