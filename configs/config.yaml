@@ -39,3 +39,5 @@ train:
   resume_ckpt_path: "auto"  # "auto"면 최신 체크포인트, 비우면 처음부터
 
 compile_model: true
+
+target_length: 10240  # 생성할 최대 토큰 길이

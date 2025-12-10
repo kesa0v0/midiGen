@@ -200,9 +200,11 @@ pyrightconfig.json
 # 1. 데이터셋 제외 (가장 중요)
 data/raw/
 data/processed/
+data/soundfonts/
 *.midi
 *.mid
 *.csv
+*.mp3
 
 # 2. Hydra 로그 및 학습 결과물 제외
 outputs/

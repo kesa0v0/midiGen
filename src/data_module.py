@@ -61,7 +61,19 @@ class MidiDataModule(pl.LightningDataModule):
                 for i in range(0, len(base_ids) - seq_len, stride):
                     chunk = base_ids[i : i + seq_len]
                     # 길이가 너무 짧은 자투리는 버림 (노이즈 방지)
-                    if len(chunk) >= seq_len // 2:
+                    # [수정] 의미 없는 침묵 구간 필터링 (Silence Filtering)
+                    # 청크 안에 'NoteOn'이나 'Pitch' 토큰이 최소 50개는 있어야 함
+                    note_count = 0
+                    for t in chunk:
+                        # 토크나이저마다 이름이 다를 수 있으니 안전하게 확인
+                        # 보통 REMI는 "Pitch_xx" 또는 "NoteOn_xx" 형태
+                        token_str = tokenizer[t]
+                        if token_str.startswith("Pitch") or token_str.startswith("NoteOn"):
+                            note_count += 1
+                    
+                    # 1. 길이는 충분한가? (기존 조건)
+                    # 2. 음표가 충분히 많은가? (추가된 조건 - 침묵 방지 핵심)
+                    if len(chunk) >= seq_len // 2 and note_count > 50:
                         all_token_ids.append(chunk)
                         
             except Exception:
