@@ -73,11 +73,11 @@ class RemiTokenizerWrapper(BaseTokenizer):
             nb_velocities=nb_velocities,
             additional_tokens=additional_tokens_config
         )
-        log.info(f"Initialized REMI Tokenizer with vocab size: {self.tokenizer.vocab_size}")
+        log.debug(f"Initialized REMI Tokenizer with vocab size: {self.tokenizer.vocab_size}")
         # Ensure [START] token is added and recognized
         if '[START]' not in self.tokenizer._token_to_id:
             self.tokenizer.add_special_tokens(['[START]'])
-            log.info(f"REMI Tokenizer after adding [START] token, vocab size: {self.tokenizer.vocab_size}")
+            log.debug(f"REMI Tokenizer after adding [START] token, vocab size: {self.tokenizer.vocab_size}")
 
     def encode(self, midi_path: Path) -> list:
         # miditok returns a list of tokens, each having an 'ids' attribute
@@ -172,8 +172,8 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         alignment = 128
         self._vocab_size = ((raw_vocab_size + alignment - 1) // alignment) * alignment
         
-        log.info(f"Initialized Anticipation Tokenizer.")
-        log.info(f"Raw Vocab Size: {raw_vocab_size} -> Aligned Vocab Size: {self._vocab_size} (Multiple of {alignment})")
+        log.debug(f"Initialized Anticipation Tokenizer.")
+        log.debug(f"Raw Vocab Size: {raw_vocab_size} -> Aligned Vocab Size: {self._vocab_size} (Multiple of {alignment})")
 
     def _generate_dummy_metadata_tokens(self) -> list:
         """Generates a structured header with dummy metadata."""
