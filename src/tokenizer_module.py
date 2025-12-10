@@ -2,17 +2,16 @@ import logging
 from pathlib import Path
 import omegaconf
 import numpy as np
-from miditoolkit import MidiFile as ToolkitMidiFile 
+import miditoolkit
 from midiutil import MIDIFile
 import os
 
-# anticipation 라이브러리 임포트 (설치 필요)
+# anticipation 라이브러리 임포트 (더 이상 직접 사용하지 않지만, 기존 코드를 정리하며 남겨둠)
 try:
     from anticipation.convert import events_to_midi, midi_to_events
     _ANTICIPATION_AVAILABLE = True
 except ImportError:
     log = logging.getLogger(__name__)
-    log.warning("Anticipation library not found. AnticipationTokenizerWrapper will use dummy functions.")
     _ANTICIPATION_AVAILABLE = False
 
 log = logging.getLogger(__name__)
@@ -119,170 +118,239 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         self._bos_token_id = 1
         self._eos_token_id = 2
         self._unk_token_id = 3
-        self._mask_token_id = 4
         
         # --- 2. Structural & Semantic Special Tokens (10-99) ---
-        # Structure Headers
         self.tokens_structure = {
-            'Global_Header': 10,
-            'Memory_Anchors': 11,
-            'Narrative_Stream': 12,
+            'Global_Header': 10, 'Memory_Anchors': 11, 'Narrative_Stream': 12, 'Time_Shift': 13 # Added Time_Shift
         }
-        
-        # Metadata keys/values (Simplified placeholders)
         self.tokens_meta = {
-            'Genre_Fantasy_Orchestral': 20,
-            'Composer_Hans_Zimmer_Style': 21,
-            'Composer_Chopin': 22,
-            'BPM_Variable': 23,
+            'Genre_Fantasy_Orchestral': 20, 'Composer_Hans_Zimmer_Style': 21,
+            'Composer_Chopin': 22, 'BPM_Variable': 23,
         }
-        
-        # Anchor Definitions
         self.tokens_anchor = {
-            'Define_Motif_A': 30,
-            'Define_Motif_B': 31,
-            'End_Motif': 32,
+            'Define_Motif_A': 30, 'Define_Motif_B': 31, 'End_Motif': 32,
         }
-        
-        # Narrative Contexts
         self.tokens_context = {
-            'Context_Peaceful_Village': 40,
-            'Context_Battle': 41,
-            'Context_Tragic_Loss': 42,
-            'Event_Surprise_Attack': 43,
-            'Intensity_Low': 44,
-            'Intensity_High': 45,
-            'Intensity_Medium': 46,
+            'Context_Peaceful_Village': 40, 'Context_Battle': 41, 'Context_Tragic_Loss': 42,
+            'Event_Surprise_Attack': 43, 'Intensity_Low': 44, 'Intensity_High': 45, 'Intensity_Medium': 46,
         }
 
-        # Offset for AMT tokens (0-99 reserved for special tokens)
+        # --- 3. Factorized AMT Vocabulary Definition ---
         self.special_token_offset = 100 
-
-        # --- 3. AMT Vocabulary Setting ---
-        # Based on snippet: AMT_GPT2_BOS_ID = 55026
-        # This implies the valid token range for AMT is roughly 0 to 55025.
-        self._base_amt_vocab_size = 55026
-        self.amt_vocab_start = self.special_token_offset 
         
-        # Calculate raw vocab size
-        raw_vocab_size = self.amt_vocab_start + self._base_amt_vocab_size
+        # Ranges definition (Offset, Count)
+        # 1. Onset: 0 ~ 100s (10ms unit) -> 10000 tokens
+        self.vocab_onset = (self.special_token_offset, 10000) 
+        self.TIME_SEGMENT_SIZE = 100.0 # seconds, for onset normalization
         
-        # Optimization: Pad vocab size to be a multiple of 128 (Tensor Core friendly)
-        # 55126 -> 55168 (adds ~42 dummy tokens)
+        # 2. Duration: 0 ~ 10s (10ms unit) -> 1000 tokens
+        self.vocab_dur = (self.vocab_onset[0] + self.vocab_onset[1], 1000)
+        
+        # 3. Instrument: 0 ~ 128 (128 is Drum) -> 129 tokens
+        self.vocab_inst = (self.vocab_dur[0] + self.vocab_dur[1], 129)
+        
+        # 4. Pitch: 0 ~ 127 -> 128 tokens
+        self.vocab_pitch = (self.vocab_inst[0] + self.vocab_inst[1], 128)
+        
+        # 5. Velocity: 0 ~ 31 (Quantized 32 levels) -> 32 tokens
+        self.vocab_vel = (self.vocab_pitch[0] + self.vocab_pitch[1], 32)
+        
+        # Calculate Total Vocab Size
+        raw_vocab_size = self.vocab_vel[0] + self.vocab_vel[1]
+        
+        # Optimization: Alignment for Tensor Cores
         alignment = 128
         self._vocab_size = ((raw_vocab_size + alignment - 1) // alignment) * alignment
         
-        log.debug(f"Initialized Anticipation Tokenizer.")
-        log.debug(f"Raw Vocab Size: {raw_vocab_size} -> Aligned Vocab Size: {self._vocab_size} (Multiple of {alignment})")
+        log.info(f"Initialized Factorized AMT Tokenizer.")
+        log.info(f"Structure: Onset->Dur->Inst->Pitch->Vel")
+        log.info(f"Total Vocab Size: {self._vocab_size} (Optimized from ~300k)")
+
+    # --- Helper: Value to Token ID ---
+    def _val2tok(self, val, vocab_range, clip=True):
+        start_idx, size = vocab_range
+        if clip:
+            val = max(0, min(val, size - 1))
+        return start_idx + int(val)
+
+    # --- Helper: Token ID to Value ---
+    def _tok2val(self, token, vocab_range):
+        start_idx, size = vocab_range
+        if start_idx <= token < start_idx + size:
+            return token - start_idx
+        return None
 
     def _generate_dummy_metadata_tokens(self) -> list:
         """Generates a structured header with dummy metadata."""
-        # [Global_Header]
-        #    [Genre: Fantasy_Orchestral]
-        #    [Composer: Hans_Zimmer_Style] (Dummy, normally inferred)
-        #    [BPM: Variable]
         header = [
             self.tokens_structure['Global_Header'],
             self.tokens_meta['Genre_Fantasy_Orchestral'],
             self.tokens_meta['Composer_Hans_Zimmer_Style'],
             self.tokens_meta['BPM_Variable']
         ]
-        
-        # [Memory_Anchors] (Dummy empty definitions for now)
-        #    [Define_Motif_A] ... [End_Motif]
-        # In future, we can extract main themes from the midi and put them here
         anchors = [
             self.tokens_structure['Memory_Anchors'],
             self.tokens_anchor['Define_Motif_A'],
             self.tokens_anchor['End_Motif']
         ]
-        
         return header + anchors
 
     def encode(self, midi_path: Path) -> list:
-        """MIDI -> Structured Tokens (Header + Anchors + Stream)"""
-        # Ensure midi_path is a Path object
-        if isinstance(midi_path, str):
-            midi_path = Path(midi_path)
-
-        if not midi_path.exists():
-            log.error(f"MIDI file not found: {midi_path}")
-            return []
-
-        if not _ANTICIPATION_AVAILABLE:
-            log.warning(f"Anticipation library not available. Returning dummy tokens for {midi_path.name}")
-            return [self.start_token_id, 101, 102, 103, self.bar_token_id, 104, self.eos_token_id, self.pad_token_id] * 5 
+        """MIDI -> Factorized AMT Tokens"""
+        if isinstance(midi_path, str): midi_path = Path(midi_path)
+        if not midi_path.exists(): return []
 
         try:
-            # 1. MIDI -> AMT Events (Tokens)
-            events = midi_to_events(str(midi_path))
-            # Shift tokens by offset
-            amt_tokens = [t + self.amt_vocab_start for t in events]
+            # 1. Load MIDI using miditoolkit (Not anticipation lib)
+            midi_obj = miditoolkit.MidiFile(str(midi_path))
             
-            # 2. Construct Structured Sequence
-            # [BOS]
-            # [Global_Header] ... [Memory_Anchors] ... (Dummy Meta)
-            # [Narrative_Stream]
-            #    [Context: Peaceful_Village] (Default Context)
-            #    [MIDI_Tokens...]
-            # [EOS]
+            notes_data = []
+            # Gather all notes from all instruments
+            for inst in midi_obj.instruments:
+                for note in inst.notes:
+                    ticks_per_beat = midi_obj.ticks_per_beat
+                    
+                    start_sec = (note.start / ticks_per_beat) * 0.5 
+                    end_sec = (note.end / ticks_per_beat) * 0.5
+                    
+                    duration = end_sec - start_sec
+                    
+                    inst_idx = 128 if inst.is_drum else inst.program
+                    vel_idx = int(note.velocity / 4)
+                    
+                    notes_data.append((start_sec, duration, inst_idx, note.pitch, vel_idx))
             
+            # Sort by Onset time
+            notes_data.sort(key=lambda x: x[0])
+            
+            # 2. Convert to Tokens with Time Segmentation
+            amt_tokens = []
+            current_time_segment = 0
+            
+            for note_start_sec, note_duration, inst_idx, pitch, vel_idx in notes_data:
+                # Calculate which segment this note belongs to
+                target_segment = int(note_start_sec // self.TIME_SEGMENT_SIZE)
+                
+                # Insert Time_Shift tokens if segments are skipped
+                while current_time_segment < target_segment:
+                    amt_tokens.append(self.tokens_structure['Time_Shift'])
+                    current_time_segment += 1
+                
+                # Normalize onset within the current segment
+                relative_onset_sec = note_start_sec % self.TIME_SEGMENT_SIZE
+                
+                onset_idx = int(relative_onset_sec * 100) # 10ms unit
+                dur_idx = int(note_duration * 100)       # 10ms unit
+                
+                # Factorized: 5 tokens per note
+                amt_tokens.append(self._val2tok(onset_idx, self.vocab_onset)) # Onset
+                amt_tokens.append(self._val2tok(dur_idx, self.vocab_dur))     # Duration
+                amt_tokens.append(self._val2tok(inst_idx, self.vocab_inst))   # Inst
+                amt_tokens.append(self._val2tok(pitch, self.vocab_pitch))     # Pitch
+                amt_tokens.append(self._val2tok(vel_idx, self.vocab_vel))     # Vel
+
+            # 3. Add Structure
             structure_prefix = self._generate_dummy_metadata_tokens()
             stream_start = [
                 self.tokens_structure['Narrative_Stream'],
-                self.tokens_context['Context_Peaceful_Village'], # Default context for now
+                self.tokens_context['Context_Peaceful_Village'],
                 self.tokens_context['Intensity_Medium']
             ]
             
             return [self._bos_token_id] + structure_prefix + stream_start + amt_tokens + [self._eos_token_id]
 
         except Exception as e:
-            log.error(f"Failed to encode {midi_path}: {e}")
+            log.error(f"Encoding failed for {midi_path}: {e}")
             return []
 
     def decode(self, tokens: list, output_path: Path):
-        """Tokens -> Filter Structural Tokens -> Events -> MIDI"""
-        if not _ANTICIPATION_AVAILABLE:
-            log.warning(f"Anticipation library not available. Generating dummy MIDI for {output_path.name}")
-            midi = MIDIFile(1)
-            track = 0
-            time = 0
-            midi.addTrackName(track, time, "Anticipation Dummy Track")
-            midi.addTempo(track, time, 120)
-            # Add some dummy notes based on tokens, if tokens are within a reasonable range
-            for i, token in enumerate(tokens):
-                if 100 <= token < 228: # Example: map some AMT tokens to note numbers (offset for pitch)
-                    midi.addNote(track, track, token - self.amt_vocab_start, time + i * 0.25, 0.5, 100)
-                elif token == self.bar_token_id: # Simulate a bar line
-                    time += 4 # Move time forward for a new bar
+        """Factorized Tokens -> MIDI"""
+        try:
+            # 1. Filter structural tokens
+            # Include Time_Shift token in valid_tokens filtering
+            valid_tokens = [t for t in tokens if t >= self.special_token_offset or t == self.tokens_structure['Time_Shift']]
+            
+            # 2. Parse 5-gram structure
+            notes = []
+            current_segment_offset_sec = 0.0 # Tracks the total time offset from Time_Shift tokens
+            buffer = {} # store parsed values
+            
+            for t in valid_tokens:
+                if t == self.tokens_structure['Time_Shift']:
+                    current_segment_offset_sec += self.TIME_SEGMENT_SIZE
+                    continue # Skip to next token after handling Time_Shift
+                    
+                # Detect token type
+                val_onset = self._tok2val(t, self.vocab_onset)
+                val_dur = self._tok2val(t, self.vocab_dur)
+                val_inst = self._tok2val(t, self.vocab_inst)
+                val_pitch = self._tok2val(t, self.vocab_pitch)
+                val_vel = self._tok2val(t, self.vocab_vel)
+                
+                if val_onset is not None:
+                    # New note starts, use normalized onset
+                    buffer = {'start_relative': val_onset / 100.0} # 10ms -> sec
+                
+                elif val_dur is not None and 'start_relative' in buffer:
+                    buffer['duration'] = val_dur / 100.0
+                
+                elif val_inst is not None and 'duration' in buffer: # Changed from 'end' to 'duration'
+                    buffer['inst'] = val_inst
+                    
+                elif val_pitch is not None and 'inst' in buffer:
+                    buffer['pitch'] = val_pitch
+                    
+                elif val_vel is not None and 'pitch' in buffer:
+                    buffer['vel'] = val_vel * 4 # De-quantize
+                    
+                    # Note Complete!
+                    # Calculate actual start and end time with segment offset
+                    actual_start_sec = buffer['start_relative'] + current_segment_offset_sec
+                    actual_end_sec = actual_start_sec + buffer['duration']
+
+                    # Ticks = Seconds * 960 (assuming 120 BPM, 480 TPB)
+                    ticks_start = int(actual_start_sec * 960)
+                    ticks_end = int(actual_end_sec * 960)
+                    
+                    new_note = miditoolkit.Note(
+                        velocity=int(buffer['vel']),
+                        pitch=int(buffer['pitch']),
+                        start=ticks_start,
+                        end=ticks_end
+                    )
+                    # Attach inst info for later grouping
+                    new_note.inst_program = buffer['inst']
+                    notes.append(new_note)
+                    
+                    buffer = {} # Reset
+
+            # 3. Create MIDI Object
+            midi_obj = miditoolkit.MidiFile()
+            midi_obj.ticks_per_beat = 480
+            
+            # Group notes by instrument
+            inst_map = {}
+            for n in notes:
+                prog = getattr(n, 'inst_program', 0)
+                is_drum = (prog == 128)
+                if is_drum: prog = 0 # Map drum to standard program 0 but on drum track
+                
+                key = (prog, is_drum)
+                if key not in inst_map:
+                    inst_map[key] = miditoolkit.Instrument(program=prog, is_drum=is_drum, name=f"Inst {prog}")
+                
+                inst_map[key].notes.append(inst) # ERROR: n instead of inst
+            
+            for inst in inst_map.values():
+                midi_obj.instruments.append(inst)
             
             os.makedirs(output_path.parent, exist_ok=True)
-            with open(output_path, "wb") as output_file:
-                midi.writeFile(output_file)
-            return
-
-
-        try:
-            # 1. Filter out all Special Tokens (0-99) and shift back AMT tokens
-            valid_tokens = []
-            for t in tokens:
-                if self.amt_vocab_start <= t < (self.amt_vocab_start + self._base_amt_vocab_size):
-                    valid_tokens.append(t - self.amt_vocab_start)
-            
-            if not valid_tokens:
-                log.warning("No valid AMT tokens found to decode.")
-                return
-
-            # 2. Tokens -> MIDI
-            midi_obj = events_to_midi(valid_tokens)
-            midi_obj.save(str(output_path))
-            
+            midi_obj.dump(str(output_path))
             log.info(f"Saved decoded MIDI to {output_path}")
 
         except Exception as e:
-            log.error(f"Failed to decode to {output_path}: {e}")
+            log.error(f"Decoding failed for {output_path}: {e}")
 
-    # --- Property ---
     @property
     def vocab_size(self) -> int:
         return self._vocab_size
@@ -297,9 +365,7 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         
     @property
     def bar_token_id(self) -> int:
-        # Placeholder: Anticipation might not have a direct "bar" token.
         return self.config.get('bar_token_id', 50) 
-
 
     @property
     def eos_token_id(self) -> int:

@@ -1,6 +1,6 @@
 # configs/config.yaml
 
-project_name: "midigen_v4_anticipation_gpt2"
+project_name: "midigen_v4_anticipation_titan"
 
 defaults:
   - _self_
@@ -17,7 +17,7 @@ data:
 
 tokenizer:
   name: anticipation # remi or anticipation
-  max_seq_len: 2048 # Moved from data config, common for both tokenizers
+  max_seq_len: 2048 # Reduced from 2048 to mitigate large vocab overhead
   remi:
     beat_res: "{(0, 4): 8, (4, 12): 4}" # Beat resolution for miditok
     nb_velocities: 24 # Number of velocity bins, renamed from num_velocities
@@ -33,19 +33,20 @@ tokenizer:
     bar_token_id: 50 # Default bar token ID for anticipation tokenizer.
 
 model:
-  type: "gpt2"  # "gpt2" 또는 "titan"
-  dim: 512
-  depth: 24
-  heads: 8
+  type: "titan"  # "gpt2" 또는 "titan"
+  dim: 256
+  depth: 8
+  heads: 4
 
 train:
-  batch_size: 8
+  batch_size: 2 # 8 -> 4 -> 2 (for VRAM OOM fix)
+  accumulate_grad_batches: 4 # 4 * 2 = 8 -> 2 * 4 = 8 (Effective Batch Size maintained)
   epochs: 50
   lr: 3e-4
-  force_preprocess: true # true로 하면 캐시 삭제 후 다시 전처리
+  force_preprocess: true # true to regenerate data with new seq_len
   resume_ckpt_path: "auto"  # "auto"면 최신 체크포인트, 비우면 처음부터
 
-compile_model: true
+compile_model: false
 
 target_composer: "Claude Debussy"
 target_length: 10240  # 생성할 최대 토큰 길이

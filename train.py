@@ -34,6 +34,13 @@ def main(cfg: DictConfig):
     # 4. 콜백 설정
     checkpoint_dir = os.path.join("checkpoints", cfg.project_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Save config to checkpoint directory for easy reference
+    from omegaconf import OmegaConf
+    config_save_path = os.path.join(checkpoint_dir, "config.yaml")
+    with open(config_save_path, "w") as f:
+        OmegaConf.save(cfg, f)
+    print(f">> [Train] Configuration saved to {config_save_path}")
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
@@ -69,7 +76,8 @@ def main(cfg: DictConfig):
         callbacks=[checkpoint_callback, early_stop_callback],
         precision="16-mixed",  # 혼합 정밀도 (메모리 절약 + 속도 UP)
         log_every_n_steps=10,
-        benchmark=True # CUDNN 최적화 활성화 (속도 향상)
+        benchmark=True, # CUDNN 최적화 활성화 (속도 향상)
+        accumulate_grad_batches=cfg.train.accumulate_grad_batches # 그래디언트 누적
     )
 
     # 6. 학습 시작
