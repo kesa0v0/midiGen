@@ -17,7 +17,7 @@ data:
 
 tokenizer:
   name: anticipation # remi or anticipation
-  max_seq_len: 2048 # Reduced from 2048 to mitigate large vocab overhead
+  max_seq_len: 2048
   remi:
     beat_res: "{(0, 4): 8, (4, 12): 4}" # Beat resolution for miditok
     nb_velocities: 24 # Number of velocity bins, renamed from num_velocities
@@ -33,20 +33,38 @@ tokenizer:
     bar_token_id: 50 # Default bar token ID for anticipation tokenizer.
 
 model:
-  type: "titan"  # "gpt2" 또는 "titan"
-  dim: 256
+  type: "titan"
+  dim: 512
   depth: 8
-  heads: 4
+  heads: 8
+
+  titan:
+    # 1. 공통 & Neural Memory 설정
+    chunk_size: 128        # = segment_len (Local Attention 윈도우 크기)
+    dim_head: 64           # 어텐션 헤드 차원
+    activation: "silu"     # 활성화 함수
+    momentum: true         # 메모리 업데이트 시 모멘텀 사용 여부
+    
+    # Neural Memory 내부 MLP 구조 (복잡도 조절)
+    memory_depth: 2        # 메모리 네트워크의 깊이
+    expansion_factor: 4.0  # 메모리 네트워크 확장 비율
+    
+    # 2. MAC (Memory As Context) 전용 설정
+    # 영구 기억 (Persistent Memory): 프롬프트나 전역 정보를 저장하는 토큰 수
+    num_persist_mem_tokens: 16
+    
+    # 장기 기억 (Long-term Memory): 과거 역사를 요약해서 가져올 토큰 수
+    num_longterm_mem_tokens: 64
 
 train:
-  batch_size: 2 # 8 -> 4 -> 2 (for VRAM OOM fix)
-  accumulate_grad_batches: 4 # 4 * 2 = 8 -> 2 * 4 = 8 (Effective Batch Size maintained)
-  epochs: 50
+  batch_size: 2
+  accumulate_grad_batches: 16
+  epochs: 100
   lr: 3e-4
-  force_preprocess: true # true to regenerate data with new seq_len
+  force_preprocess: false # true to regenerate data with new seq_len
   resume_ckpt_path: "auto"  # "auto"면 최신 체크포인트, 비우면 처음부터
 
-compile_model: false
+compile_model: true
 
-target_composer: "Claude Debussy"
+target_composer: "Frédéric_Chopin"
 target_length: 10240  # 생성할 최대 토큰 길이

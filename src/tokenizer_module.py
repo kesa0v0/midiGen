@@ -162,9 +162,9 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         alignment = 128
         self._vocab_size = ((raw_vocab_size + alignment - 1) // alignment) * alignment
         
-        log.info(f"Initialized Factorized AMT Tokenizer.")
-        log.info(f"Structure: Onset->Dur->Inst->Pitch->Vel")
-        log.info(f"Total Vocab Size: {self._vocab_size} (Optimized from ~300k)")
+        log.debug(f"Initialized Factorized AMT Tokenizer.")
+        log.debug(f"Structure: Onset->Dur->Inst->Pitch->Vel")
+        log.debug(f"Total Vocab Size: {self._vocab_size} (Optimized from ~300k)")
 
     # --- Helper: Value to Token ID ---
     def _val2tok(self, val, vocab_range, clip=True):

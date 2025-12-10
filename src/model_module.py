@@ -3,6 +3,7 @@ import torch
 from torch.optim import AdamW
 from transformers import GPT2Config, GPT2LMHeadModel
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from src.models import MidigenTitans
 
 class MidiGenModule(pl.LightningModule):
     def __init__(self, cfg, vocab_size=None):
@@ -37,15 +38,20 @@ class MidiGenModule(pl.LightningModule):
                 attn_implementation="flash_attention_2"
             )
             self.model = GPT2LMHeadModel(config)
+        elif cfg.model.type == "titan":
+            # Titans 모델 초기화
+            # vocab_size를 명시적으로 전달하여 정합성 보장
+            self.model = MidigenTitans(cfg, vocab_size=self.vocab_size)
         else:
-            # Titans 등 다른 모델 확장 가능
-            raise NotImplementedError("GPT2 외 모델은 아직 미구현")
-        
+            raise NotImplementedError(f"Model type '{cfg.model.type}' not implemented")        
+
+
         compile_model = getattr(cfg, "compile_model", False)
         if compile_model:
             try:
                 # mode="reduce-overhead": CUDA 그래프 등을 활용해 CPU 오버헤드 최소화 (학습 속도 향상)
-                self.model = torch.compile(self.model, mode="reduce-overhead")
+                # "default" 모드로 변경하여 호환성 확보
+                self.model = torch.compile(self.model, mode="default")
             except Exception as e:
                 print(f"!! torch.compile 실패 (무시하고 진행합니다): {e}")
 
