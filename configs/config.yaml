@@ -11,19 +11,28 @@ hydra:
 
 data:
   # 데이터 경로 (상대 경로 주의)
-  raw_path: "${hydra:runtime.cwd}/data/raw/maestro-v3.0.0" 
+  raw_path: "${hydra:runtime.cwd}/data/raw/maestro-v3.0.0"
   csv_path: "${hydra:runtime.cwd}/data/raw/maestro-v3.0.0/maestro-v3.0.0.csv"
   processed_path: "${hydra:runtime.cwd}/data/processed/maestro_tokenized"
-  
-  # 토크나이저 설정
-  max_seq_len: 1024
-  vocab_size: 500
-  num_velocities: 24
-  use_chords: true
 
-  # 박자 쪼개기 설정 (비트를 4개로만 쪼갬 -> 16분음표 단위)
-  # 숫자가 작을수록 AI가 박자를 잡기 쉬워집니다.
-  beat_res: "{(0, 4): 8, (4, 12): 4}"
+tokenizer:
+  name: remi # or anticipation
+  max_seq_len: 1024 # Moved from data config, common for both tokenizers
+  vocab_size: 500 # Moved from data config, common for both tokenizers
+  remi:
+    beat_res: "{(0, 4): 8, (4, 12): 4}" # Beat resolution for miditok
+    nb_velocities: 24 # Number of velocity bins, renamed from num_velocities
+    use_chords: true
+    use_rests: False # Defaulting to false, was not in original config
+    use_programs: False # Defaulting to false, was not in original config
+    use_tempos: False # Defaulting to false, was not in original config
+    use_time_signatures: False # Defaulting to false, was not in original config
+    rest_range: "[2, 8]" # Defaulting to common range
+    tempo_range: "[50, 200]" # Defaulting to common range
+    use_program_changes: False # Defaulting to false
+  anticipation:
+    # TODO: Add specific configurations for anticipation tokenizer here
+    dummy_param: 1 # Placeholder for future anticipation tokenizer config
 
 model:
   type: "gpt2"  # "gpt2" 또는 "titan"
