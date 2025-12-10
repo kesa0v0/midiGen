@@ -223,3 +223,6 @@ wandb/
 Thumbs.db
 
 lightning_logs/
+
+tokenizer.json
+composer_map.json
