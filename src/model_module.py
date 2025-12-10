@@ -5,16 +5,31 @@ from transformers import GPT2Config, GPT2LMHeadModel
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 class MidiGenModule(pl.LightningModule):
-    def __init__(self, cfg):
+    def __init__(self, cfg, vocab_size=None):
         super().__init__()
         self.save_hyperparameters() # cfg 저장 (체크포인트에 자동 포함됨)
         self.cfg = cfg
         
+        # Determine vocab_size: explicit argument > config > default error
+        if vocab_size is not None:
+            self.vocab_size = vocab_size
+        elif hasattr(cfg, 'tokenizer') and hasattr(cfg.tokenizer, 'vocab_size'):
+             # Fallback for backward compatibility or if passed in config (though discouraged)
+            self.vocab_size = cfg.tokenizer.vocab_size
+        elif hasattr(cfg, 'data') and hasattr(cfg.data, 'vocab_size'):
+             # Legacy fallback
+            self.vocab_size = cfg.data.vocab_size
+        else:
+             # Default to a safe placeholder if mostly testing, but warn
+             # In production, this should likely raise an error.
+             print("Warning: vocab_size not provided. Using default 500.")
+             self.vocab_size = 500
+
         # 1. 모델 정의
         if cfg.model.type == "gpt2":
             config = GPT2Config(
-                vocab_size=cfg.data.vocab_size,
-                n_positions=cfg.data.max_seq_len,
+                vocab_size=self.vocab_size,
+                n_positions=cfg.tokenizer.max_seq_len, # Updated to cfg.tokenizer
                 n_embd=cfg.model.dim,
                 n_layer=cfg.model.depth,
                 n_head=cfg.model.heads,

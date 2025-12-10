@@ -18,7 +18,6 @@ data:
 tokenizer:
   name: remi # or anticipation
   max_seq_len: 1024 # Moved from data config, common for both tokenizers
-  vocab_size: 500 # Moved from data config, common for both tokenizers
   remi:
     beat_res: "{(0, 4): 8, (4, 12): 4}" # Beat resolution for miditok
     nb_velocities: 24 # Number of velocity bins, renamed from num_velocities

@@ -11,3 +11,4 @@ accelerate
 pytorch-lightning
 flash-attn
 git+https://github.com/jthickstun/anticipation.git
+midiutil

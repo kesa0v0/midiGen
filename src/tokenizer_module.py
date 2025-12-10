@@ -1,15 +1,24 @@
-# src/tokenizer_module.py
+import logging
+from pathlib import Path
+import omegaconf
+import numpy as np
+from miditoolkit import MidiFile as ToolkitMidiFile 
+from midiutil import MIDIFile
+import os
+
+# anticipation 라이브러리 임포트 (설치 필요)
+try:
+    from anticipation.convert import events_to_midi, midi_to_events
+    _ANTICIPATION_AVAILABLE = True
+except ImportError:
+    log = logging.getLogger(__name__)
+    log.warning("Anticipation library not found. AnticipationTokenizerWrapper will use dummy functions.")
+    _ANTICIPATION_AVAILABLE = False
+
+log = logging.getLogger(__name__)
 
 from abc import ABC, abstractmethod
 import miditok
-import omegaconf
-import logging
-from pathlib import Path
-# Assuming 'anticipation' can be imported after installation
-import anticipation # noqa: F401 (ignore flake8 unused import warning for now)
-from midiutil import MIDIFile # For dummy MIDI generation in placeholder
-
-log = logging.getLogger(__name__)
 
 class BaseTokenizer(ABC):
     @abstractmethod
@@ -103,52 +112,98 @@ class RemiTokenizerWrapper(BaseTokenizer):
 
 class AnticipationTokenizerWrapper(BaseTokenizer):
     def __init__(self, config: omegaconf.DictConfig):
-        # In a real scenario, you'd load/initialize the anticipation tokenizer here.
-        # This might involve defining an event vocabulary or loading a pre-trained one.
-        log.warning("AnticipationTokenizerWrapper is a placeholder and requires actual implementation.")
         self.config = config
         
-        # These would typically come from the anticipation library's vocabulary
-        self._vocab_size = config.get('vocab_size', 1000) # Example default
-        self._pad_token_id = config.get('pad_token_id', 0) # Example default
-        self._start_token_id = config.get('start_token_id', 1) # Example default
-        self._bar_token_id = config.get('bar_token_id', 2) # Example default, assuming 'bar' concept exists
-        log.info(f"Initialized Anticipation Tokenizer (Placeholder) with vocab size: {self._vocab_size}")
+        # --- 1. Special Tokens 설정 (0~99번 예약) ---
+        self._pad_token_id = 0
+        self._bos_token_id = 1
+        self._eos_token_id = 2
+        self._unk_token_id = 3
+        self._mask_token_id = 4
+        
+        # 커스텀 메타데이터 토큰 (앞서 논의한 Context/Composer)
+        self.special_token_offset = 100 
+
+        # --- 2. AMT Vocabulary 설정 ---
+        # Based on snippet: AMT_GPT2_BOS_ID = 55026
+        # This implies the valid token range for AMT is roughly 0 to 55025.
+        self._base_amt_vocab_size = 55026
+        self.amt_vocab_start = self.special_token_offset 
+        self._vocab_size = self.amt_vocab_start + self._base_amt_vocab_size
+
+        log.info(f"Initialized Anticipation Tokenizer.")
+        log.info(f"Total Vocab Size: {self._vocab_size} (Special: {self.special_token_offset} + AMT: {self._base_amt_vocab_size})")
 
     def encode(self, midi_path: Path) -> list:
-        # TODO: Implement encoding for anticipation tokenizer
-        # This would involve:
-        # 1. Loading the MIDI file: midi_data = anticipation.load_midi(midi_path)
-        # 2. Converting MIDI data to anticipation's event representation: events = anticipation.midi_to_events(midi_data)
-        # 3. Converting events to numerical tokens: tokens = anticipation.events_to_tokens(events, self.vocabulary)
-        log.warning(f"AnticipationTokenizerWrapper encode is a placeholder. Encoding {midi_path.name}")
-        # Return dummy tokens for now
-        return [self.start_token_id, 3, 4, 5, self.bar_token_id, 6, 7, self.pad_token_id] * 10
+        """MIDI -> Events -> Tokens"""
+        if not midi_path.exists():
+            log.error(f"MIDI file not found: {midi_path}")
+            return []
+
+        if not _ANTICIPATION_AVAILABLE:
+            log.warning(f"Anticipation library not available. Returning dummy tokens for {midi_path.name}")
+            return [self.start_token_id, 101, 102, 103, self.bar_token_id, 104, self.eos_token_id, self.pad_token_id] * 5 # Dummy
+
+        try:
+            # 1. MIDI -> Events (Tokens)
+            # midi_to_events returns a list of integer tokens
+            events = midi_to_events(str(midi_path))
+            
+            # 2. Shift tokens by offset
+            amt_tokens = [t + self.amt_vocab_start for t in events]
+
+            # 3. Add BOS/EOS
+            return [self._bos_token_id] + amt_tokens + [self._eos_token_id]
+
+        except Exception as e:
+            log.error(f"Failed to encode {midi_path}: {e}")
+            return []
 
     def decode(self, tokens: list, output_path: Path):
-        # TODO: Implement decoding for anticipation tokenizer
-        # This would involve:
-        # 1. Converting numerical tokens back to anticipation's event representation: events = anticipation.tokens_to_events(tokens, self.vocabulary)
-        # 2. Converting events to MIDI data: midi_data = anticipation.events_to_midi(events)
-        # 3. Saving the MIDI data: anticipation.save_midi(midi_data, output_path)
-        log.warning(f"AnticipationTokenizerWrapper decode is a placeholder. Decoding to {output_path.name}")
-        
-        # Create a dummy MIDI file for now using midiutil
-        midi = MIDIFile(1)
-        track = 0
-        time = 0
-        midi.addTrackName(track, time, "Anticipation Dummy Track")
-        midi.addTempo(track, time, 120)
-        # Add some dummy notes based on tokens, if tokens are within a reasonable range
-        for i, token in enumerate(tokens):
-            if 60 <= token < 72: # Example: map some tokens to note numbers
-                midi.addNote(track, time + i * 0.5, token, 1, 0.5, 100) # Note, channel, pitch, time, duration, velocity
-            elif token == self.bar_token_id: # Simulate a bar line
-                time += 4 # Move time forward for a new bar
-        
-        with open(output_path, "wb") as output_file:
-            midi.writeFile(output_file)
+        """Tokens -> Events -> MIDI"""
+        if not _ANTICIPATION_AVAILABLE:
+            log.warning(f"Anticipation library not available. Generating dummy MIDI for {output_path.name}")
+            midi = MIDIFile(1)
+            track = 0
+            time = 0
+            midi.addTrackName(track, time, "Anticipation Dummy Track")
+            midi.addTempo(track, time, 120)
+            # Add some dummy notes based on tokens, if tokens are within a reasonable range
+            for i, token in enumerate(tokens):
+                if 100 <= token < 228: # Example: map some AMT tokens to note numbers (offset for pitch)
+                    midi.addNote(track, track, token - self.amt_vocab_start, time + i * 0.25, 0.5, 100)
+                elif token == self.bar_token_id: # Simulate a bar line
+                    time += 4 # Move time forward for a new bar
+            
+            os.makedirs(output_path.parent, exist_ok=True)
+            with open(output_path, "wb") as output_file:
+                midi.writeFile(output_file)
+            return
 
+
+        try:
+            # 1. Filter and Shift back
+            valid_tokens = [
+                t - self.amt_vocab_start
+                for t in tokens
+                if self.amt_vocab_start <= t < (self.amt_vocab_start + self._base_amt_vocab_size)
+            ]
+            
+            if not valid_tokens:
+                log.warning("No valid AMT tokens found to decode.")
+                return
+
+            # 2. Tokens -> MIDI
+            # events_to_midi returns a miditoolkit/mido object with a .save method
+            midi_obj = events_to_midi(valid_tokens)
+            midi_obj.save(str(output_path))
+            
+            log.info(f"Saved decoded MIDI to {output_path}")
+
+        except Exception as e:
+            log.error(f"Failed to decode to {output_path}: {e}")
+
+    # --- Property ---
     @property
     def vocab_size(self) -> int:
         return self._vocab_size
@@ -156,14 +211,20 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
     @property
     def pad_token_id(self) -> int:
         return self._pad_token_id
-
+    
     @property
     def start_token_id(self) -> int:
-        return self._start_token_id
-
+        return self._bos_token_id
+        
     @property
     def bar_token_id(self) -> int:
-        return self._bar_token_id
+        # Placeholder: Anticipation might not have a direct "bar" token.
+        return self.config.get('bar_token_id', 50) 
+
+
+    @property
+    def eos_token_id(self) -> int:
+        return self._eos_token_id
 
 def get_tokenizer(cfg: omegaconf.DictConfig) -> BaseTokenizer:
     tokenizer_name = cfg.tokenizer.name
@@ -171,11 +232,7 @@ def get_tokenizer(cfg: omegaconf.DictConfig) -> BaseTokenizer:
         # Pass the remi specific config
         return RemiTokenizerWrapper(cfg.tokenizer.remi)
     elif tokenizer_name == "anticipation":
-        # Pass the anticipation specific config, along with global max_seq_len and vocab_size if needed
-        # For a more robust solution, 'anticipation' config would have its own vocab_size etc.
-        anticipation_cfg_with_globals = omegaconf.OmegaConf.merge(cfg.tokenizer.anticipation, 
-                                                                  omegaconf.OmegaConf.create({'vocab_size': cfg.tokenizer.vocab_size}))
-        return AnticipationTokenizerWrapper(anticipation_cfg_with_globals)
+        # Pass the anticipation specific config.
+        return AnticipationTokenizerWrapper(cfg.tokenizer.anticipation)
     else:
         raise ValueError(f"Unknown tokenizer name: {tokenizer_name}")
-
