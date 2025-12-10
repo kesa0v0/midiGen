@@ -8,6 +8,8 @@ import json
 from src.model_module import MidiGenModule # Lightning Module 불러오기
 from tqdm import tqdm
 
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -24,7 +26,8 @@ def main(cfg: DictConfig):
         composer_to_id = mapping_info["composer_to_id"]
         base_vocab_size = mapping_info["base_vocab_size"]
         
-        target_composer = "Frédéric Chopin" 
+        # config에서 target_composer 읽기
+        target_composer = cfg.target_composer if hasattr(cfg, "target_composer") else "Frédéric Chopin"
         if target_composer not in composer_to_id:
             target_composer = list(composer_to_id.keys())[0]
         
@@ -126,7 +129,8 @@ def main(cfg: DictConfig):
     print("\n>> 변환 및 저장 중...")
     final_midi_ids = [t for t in full_generated_sequence if t < len(tokenizer)]
     generated_midi = tokenizer.decode([final_midi_ids])
-    save_path = f"output_{target_composer.replace(' ', '_')}_long.mid"
+    os.makedirs("generated_output", exist_ok=True)
+    save_path = os.path.join("generated_output", f"output_{target_composer.replace(' ', '_')}_long.mid")
     generated_midi.dump_midi(save_path)
     print(f"\n=== 🎹 긴 곡 작곡 완료! 저장됨: {save_path} ===")
 

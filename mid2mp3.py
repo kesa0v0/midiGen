@@ -25,9 +25,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     midi_path = args.input
+    midi_dir = os.path.dirname(midi_path) if os.path.dirname(midi_path) else "."
     base = os.path.splitext(os.path.basename(midi_path))[0]
-    wav_path = base + ".wav"
-    mp3_path = args.output if args.output else base + ".mp3"
+    wav_path = os.path.join(midi_dir, base + ".wav")
+    mp3_path = args.output if args.output else os.path.join(midi_dir, base + ".mp3")
 
     midi_to_wav(midi_path, wav_path, args.soundfont)
     wav_to_mp3(wav_path, mp3_path)
