@@ -67,7 +67,8 @@ class MidigenTitans(nn.Module):
         # 보통 titans-pytorch는 전체 시퀀스를 반환하는 경향이 있습니다.
         sampled = self.model.sample(
             input_ids, 
-            seq_len_to_gen
+            seq_len_to_gen,
+            **kwargs
             # temperature 등은 sample 함수 내부 기본값 사용 또는 필요시 **kwargs 파싱해서 전달
         )
         

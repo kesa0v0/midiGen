@@ -91,9 +91,9 @@ def main(cfg: DictConfig):
         generated_ids = model_module.model.generate(
             input_ids, 
             max_length=cfg.target_length,
-            temperature=1.0,
-            top_k=20,
-            repetition_penalty=1.1,
+            temperature=0.75,
+            filter_kwargs=dict(min_p=0.1),
+            show_progress=True
         )
 
     # 6. 저장
