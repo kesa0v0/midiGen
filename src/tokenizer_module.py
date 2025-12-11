@@ -5,6 +5,7 @@ import numpy as np
 import miditoolkit
 from midiutil import MIDIFile
 import os
+import json
 
 # anticipation 라이브러리 임포트 (더 이상 직접 사용하지 않지만, 기존 코드를 정리하며 남겨둠)
 try:
@@ -121,12 +122,10 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         
         # --- 2. Structural & Semantic Special Tokens (10-99) ---
         self.tokens_structure = {
-            'Global_Header': 10, 'Memory_Anchors': 11, 'Narrative_Stream': 12, 'Time_Shift': 13 # Added Time_Shift
+            'Global_Header': 10, 'Memory_Anchors': 11, 'Narrative_Stream': 12, 'Time_Shift': 13
         }
-        self.tokens_meta = {
-            'Genre_Fantasy_Orchestral': 20, 'Composer_Hans_Zimmer_Style': 21,
-            'Composer_Chopin': 22, 'BPM_Variable': 23,
-        }
+        self.composer_map = {}
+        self.composer_vocab_start = 0
         self.tokens_anchor = {
             'Define_Motif_A': 30, 'Define_Motif_B': 31, 'End_Motif': 32,
         }
@@ -160,11 +159,43 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         
         # Optimization: Alignment for Tensor Cores
         alignment = 128
-        self._vocab_size = ((raw_vocab_size + alignment - 1) // alignment) * alignment
+        self._base_vocab_size = ((raw_vocab_size + alignment - 1) // alignment) * alignment
+
+        self._load_composer_map()
         
         log.debug(f"Initialized Factorized AMT Tokenizer.")
         log.debug(f"Structure: Onset->Dur->Inst->Pitch->Vel")
-        log.debug(f"Total Vocab Size: {self._vocab_size} (Optimized from ~300k)")
+        log.debug(f"Total Vocab Size: {self._base_vocab_size} (Optimized from ~300k)")
+
+    def _load_composer_map(self):
+        """composer_map.json이 있으면 로드하여 vocab을 확장함"""
+        map_path = Path("composer_map.json")
+        if map_path.exists():
+            with open(map_path, "r") as f:
+                data = json.load(f)
+                self.composer_map = data.get("composer_to_id", {})
+                # 작곡가 토큰은 기본 vocab 뒤에 붙음
+                self.composer_vocab_start = self._base_vocab_size
+        else:
+            self.composer_map = {}
+
+    def _generate_metadata_tokens(self, composer_name: str = None) -> list:
+        """실제 작곡가 정보를 바탕으로 헤더 토큰 생성"""
+        header = [self.tokens_structure['Global_Header']]
+        
+        # 1. 작곡가 토큰 처리
+        if composer_name and composer_name in self.composer_map:
+            # 작곡가 ID + 오프셋
+            comp_token = self.composer_vocab_start + self.composer_map[composer_name]
+            header.append(comp_token)
+        else:
+            # 알 수 없는 작곡가 or 맵이 없는 경우 (UNK 혹은 기본값)
+            # 여기서는 예시로 Global_Header만 반환하거나 UNK 처리
+            pass 
+
+        # 2. 기타 메타데이터 (장르, BPM 등은 현재 데이터셋에 없으므로 생략하거나 추후 추가)
+        
+        return header
 
     # --- Helper: Value to Token ID ---
     def _val2tok(self, val, vocab_range, clip=True):
@@ -195,7 +226,7 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         ]
         return header + anchors
 
-    def encode(self, midi_path: Path) -> list:
+    def encode(self, midi_path: Path, composer: str = None) -> list:
         """MIDI -> Factorized AMT Tokens"""
         if isinstance(midi_path, str): midi_path = Path(midi_path)
         if not midi_path.exists(): return []
@@ -250,7 +281,7 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
                 amt_tokens.append(self._val2tok(vel_idx, self.vocab_vel))     # Vel
 
             # 3. Add Structure
-            structure_prefix = self._generate_dummy_metadata_tokens()
+            structure_prefix = self._generate_metadata_tokens(composer)
             stream_start = [
                 self.tokens_structure['Narrative_Stream'],
                 self.tokens_context['Context_Peaceful_Village'],
@@ -338,22 +369,23 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
                 key = (prog, is_drum)
                 if key not in inst_map:
                     inst_map[key] = miditoolkit.Instrument(program=prog, is_drum=is_drum, name=f"Inst {prog}")
-                
-                inst_map[key].notes.append(inst) # ERROR: n instead of inst
-            
+
+                inst_map[key].notes.append(n)
+
             for inst in inst_map.values():
                 midi_obj.instruments.append(inst)
-            
+
             os.makedirs(output_path.parent, exist_ok=True)
             midi_obj.dump(str(output_path))
             log.info(f"Saved decoded MIDI to {output_path}")
 
         except Exception as e:
             log.error(f"Decoding failed for {output_path}: {e}")
-
+            raise e  # [추가] 에러를 상위로 던져서 generate.py가 알게 함!
+        
     @property
     def vocab_size(self) -> int:
-        return self._vocab_size
+        return self._base_vocab_size + len(self.composer_map)
 
     @property
     def pad_token_id(self) -> int:

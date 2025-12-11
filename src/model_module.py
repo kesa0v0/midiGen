@@ -77,7 +77,7 @@ class MidiGenModule(pl.LightningModule):
     def configure_optimizers(self):
         # 1. 옵티마이저 설정 (AdamW 추천)
         # fused=True: PyTorch 2.0+에서 GPU 연산 속도 향상
-        optimizer = AdamW(self.parameters(), lr=self.cfg.train.lr, fused=True)
+        optimizer = AdamW(self.parameters(), lr=self.cfg.train.lr, fused=False)
         
         # 2. 스케줄러 설정 (Cosine Annealing)
         # T_max: 보통 전체 에폭(epochs) 수로 설정합니다.

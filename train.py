@@ -74,7 +74,8 @@ def main(cfg: DictConfig):
         accelerator="auto",
         devices="auto",
         callbacks=[checkpoint_callback, early_stop_callback],
-        precision="16-mixed",  # 혼합 정밀도 (메모리 절약 + 속도 UP)
+        precision="bf16-mixed",
+        gradient_clip_val=1.0,
         log_every_n_steps=10,
         benchmark=True, # CUDNN 최적화 활성화 (속도 향상)
         accumulate_grad_batches=cfg.train.accumulate_grad_batches # 그래디언트 누적

@@ -1,30 +1,41 @@
-import pytorch_lightning as pl
-from torch.utils.data import DataLoader
-from torch.nn.utils.rnn import pad_sequence
-import torch
-from datasets import load_from_disk, Dataset, DatasetDict
-import pandas as pd
+import json
 import os
+import glob
+import random
+import numpy as np
+import pandas as pd
+
+from functools import partial
+from multiprocessing import Pool, cpu_count
+
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
-from src.tokenizer_module import get_tokenizer # Import the new tokenizer factory
+from loguru import logger as log
 import logging
 from functools import partial
+
+import torch
+from torch.utils.data import Dataset, DataLoader
+import pytorch_lightning as pl
+from datasets import load_from_disk, Dataset, DatasetDict
+from torch.nn.utils.rnn import pad_sequence
+from omegaconf import OmegaConf
+
+from src.tokenizer_module import get_tokenizer
+
 
 log = logging.getLogger(__name__)
 
 # Multiprocessing을 위한 헬퍼 함수 (클래스 외부에 정의해야 피클링 가능)
-def _process_midi_file(path, cfg_dict, seq_len, stride, tokenizer_name):
-    # 각 프로세스마다 tokenizer 새로 생성 (필수)
-    # OmegaConf 객체는 피클링이 안 될 수 있으므로 dict로 받아서 다시 변환하거나
-    # 여기서 필요한 설정만 사용하는 것이 좋음. 편의상 cfg 전체를 넘기되,
-    # 실제로는 get_tokenizer가 OmegaConf를 기대하므로 여기서 변환 처리 필요.
-    from omegaconf import OmegaConf
+def _process_midi_file(item, cfg_dict, seq_len, stride, tokenizer_name):
+    path, composer = item  # Unpacking
+    
     cfg = OmegaConf.create(cfg_dict)
     
     try:
         tokenizer = get_tokenizer(cfg)
-        tokens_ids = tokenizer.encode(path)
+        # [핵심] tokenizer.encode에 composer 전달
+        tokens_ids = tokenizer.encode(path, composer=composer)
         if not tokens_ids: return []
 
         chunks = []
@@ -77,13 +88,31 @@ class MidiDataModule(pl.LightningDataModule):
 
         # 1) 메타데이터 로드
         df = pd.read_csv(self.cfg.data.csv_path)
+        
+        # [추가] 작곡가 매핑 생성 및 저장
+        composers = sorted(df['canonical_composer'].unique())
+        composer_to_id = {name: i for i, name in enumerate(composers)}
+        
+        # Tokenizer가 이 파일을 로드해서 Vocab을 확장함
+        with open("composer_map.json", "w") as f:
+            json.dump({
+                "composer_to_id": composer_to_id,
+                "count": len(composers)
+            }, f, indent=4)
+        log.info(f">> [DataModule] 작곡가 맵 저장됨 (총 {len(composers)}명)")
+
+        # 2) 경로 및 작곡가 정보 준비
         midi_paths = [os.path.join(self.cfg.data.raw_path, x) for x in df['midi_filename']]
+        midi_composers = df['canonical_composer'].tolist()
+        
+        # 병렬 처리를 위해 (경로, 작곡가) 튜플 리스트 생성
+        process_items = list(zip(midi_paths, midi_composers))
 
-        # 2) 토크나이저 설정
+        # 3) 토크나이저 설정
         # 메인 프로세스에서도 tokenizer 초기화 (vocab_size 확인 용도 등)
-        self.tokenizer = get_tokenizer(self.cfg)
+        self.tokenizer = get_tokenizer(self.cfg) # 이때 composer_map.json을 읽음
 
-        # 3) 병렬 처리 설정
+        # 4) 병렬 처리 설정
         seq_len = self.cfg.tokenizer.max_seq_len 
         stride = seq_len  
         tokenizer_name = self.cfg.tokenizer.name
@@ -92,13 +121,13 @@ class MidiDataModule(pl.LightningDataModule):
         from omegaconf import OmegaConf
         cfg_dict = OmegaConf.to_container(self.cfg, resolve=True)
 
-        log.info(f">> 병렬 토큰화 시작 (총 {len(midi_paths)}곡, CPU 코어 활용)...")
+        log.info(f">> 병렬 토큰화 시작 (총 {len(midi_paths)}곡)...")
         
         # process_map을 사용하여 병렬 처리 실행
         # max_workers는 CPU 코어 수만큼 자동 할당됨
         results = process_map(
             partial(_process_midi_file, cfg_dict=cfg_dict, seq_len=seq_len, stride=stride, tokenizer_name=tokenizer_name),
-            midi_paths,
+            process_items, # [수정] items 전달
             chunksize=10,
             desc="Tokenizing MIDI files"
         )
