@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from titans_pytorch import MemoryAsContextTransformer
 from transformers.modeling_outputs import CausalLMOutput
+from mamba_ssm import Mamba
 
 class MidigenTitans(nn.Module):
     def __init__(self, cfg, vocab_size=None):
@@ -77,3 +78,111 @@ class MidigenTitans(nn.Module):
              return input_ids
              
         return sampled
+
+
+# Mamba Block 정의 (LayerNorm + Mamba + Residual)
+class MambaBlock(nn.Module):
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.mamba = Mamba(
+            d_model=dim, 
+            d_state=d_state, 
+            d_conv=d_conv, 
+            expand=expand
+        )
+        
+    def forward(self, x):
+        # Residual Connection
+        return x + self.mamba(self.norm(x))
+
+class MidigenMamba(nn.Module):
+    def __init__(self, cfg, vocab_size=None):
+        super().__init__()
+        self.cfg = cfg
+        self.dim = cfg.model.dim
+        self.vocab_size = vocab_size if vocab_size is not None else cfg.data.vocab_size
+        
+        # 1. 임베딩
+        self.token_emb = nn.Embedding(self.vocab_size, self.dim)
+        # Mamba는 Positional Embedding이 필수는 아니지만, 음악의 박자를 위해 넣는 것을 추천
+        self.pos_emb = nn.Embedding(cfg.tokenizer.max_seq_len, self.dim)
+        
+        # 2. Mamba 레이어 스택
+        mamba_cfg = cfg.model.mamba
+        self.layers = nn.ModuleList([
+            MambaBlock(
+                dim=self.dim,
+                d_state=mamba_cfg.d_state,
+                d_conv=mamba_cfg.d_conv,
+                expand=mamba_cfg.expand
+            ) for _ in range(cfg.model.depth)
+        ])
+        
+        # 3. 출력층
+        self.norm_f = nn.LayerNorm(self.dim)
+        self.head = nn.Linear(self.dim, self.vocab_size, bias=False)
+
+    def forward(self, input_ids, labels=None):
+        b, n = input_ids.shape
+        device = input_ids.device
+        
+        # 위치 임베딩
+        positions = torch.arange(n, device=device)
+        x = self.token_emb(input_ids) + self.pos_emb(positions)
+        
+        # Mamba 통과
+        for layer in self.layers:
+            x = layer(x)
+            
+        x = self.norm_f(x)
+        logits = self.head(x)
+
+        loss = None
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, self.vocab_size), shift_labels.view(-1))
+            
+        return CausalLMOutput(loss=loss, logits=logits)
+
+    # 생성 함수 (Autoregressive)
+    def generate(self, input_ids, max_length=512, temperature=1.0, top_k=40, top_p=0.9, repetition_penalty=1.0, **kwargs):
+        # Mamba는 전체 시퀀스를 다시 넣어도 연산량이 선형(Linear)이라 빠릅니다.
+        # 최적화된 step-by-step inference도 가능하지만, 구현 편의를 위해 일단 전체 입력 방식을 씁니다.
+        
+        model_max_len = self.pos_emb.num_embeddings
+        
+        while input_ids.shape[1] < max_length:
+            # 입력 길이 제한 (Positional Embedding 한계 때문)
+            curr_input = input_ids if input_ids.shape[1] < model_max_len else input_ids[:, -model_max_len:]
+            
+            outputs = self(curr_input)
+            next_token_logits = outputs.logits[:, -1, :]
+            
+            # 후처리 (Sampling)
+            if repetition_penalty != 1.0:
+                for i in range(input_ids.shape[0]):
+                    for token in set(input_ids[i].tolist()):
+                        if next_token_logits[i, token] < 0:
+                            next_token_logits[i, token] *= repetition_penalty
+                        else:
+                            next_token_logits[i, token] /= repetition_penalty
+
+            # Top-K / Top-P / Temperature
+            if temperature != 1.0:
+                next_token_logits = next_token_logits / temperature
+                
+            probs = torch.softmax(next_token_logits, dim=-1)
+            
+            # (생략 가능) 간단한 Top-K 구현
+            if top_k > 0:
+                v, _ = torch.topk(probs, top_k)
+                probs[probs < v[:, [-1]]] = 0
+                probs = probs / probs.sum(dim=-1, keepdim=True)
+                
+            next_token = torch.multinomial(probs, 1)
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            
+        return input_ids

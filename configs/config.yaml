@@ -1,6 +1,6 @@
 # configs/config.yaml
 
-project_name: "midigen_v4_anticipation_titan"
+project_name: "midigen_v4"
 
 defaults:
   - _self_
@@ -33,10 +33,16 @@ tokenizer:
     bar_token_id: 50 # Default bar token ID for anticipation tokenizer.
 
 model:
-  type: "titan"
+  type: "mamba"
   dim: 512
   depth: 8
   heads: 8
+
+  # Mamba 전용 설정
+  mamba:
+    d_state: 16        # SSM 상태 크기 (보통 16 고정)
+    d_conv: 4          # 로컬 컨볼루션 크기 (보통 4)
+    expand: 2          # 내부 확장 비율 (보통 2)
 
   titan:
     # 1. 공통 & Neural Memory 설정
@@ -57,10 +63,10 @@ model:
     num_longterm_mem_tokens: 128
 
 train:
-  batch_size: 2
-  accumulate_grad_batches: 16
+  batch_size: 8
+  accumulate_grad_batches: 4
   epochs: 100
-  lr: 3e-4
+  lr: 1e-3
   force_preprocess: false # true to regenerate data with new seq_len
   resume_ckpt_path: "auto"  # "auto"면 최신 체크포인트, 비우면 처음부터
 
