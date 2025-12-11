@@ -52,6 +52,7 @@ model:
     d_state: 16        # SSM 상태 크기 (보통 16 고정)
     d_conv: 4          # 로컬 컨볼루션 크기 (보통 4)
     expand: 2          # 내부 확장 비율 (보통 2)
+    headdim: 8       # 어텐션 헤드 차원
 
   titan:
     # 1. 공통 & Neural Memory 설정

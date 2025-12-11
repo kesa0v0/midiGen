@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from titans_pytorch import MemoryAsContextTransformer
 from transformers.modeling_outputs import CausalLMOutput
-from mamba_ssm import Mamba
+from mamba_ssm import Mamba2
 
 class MidigenTitans(nn.Module):
     def __init__(self, cfg, vocab_size=None):
@@ -82,14 +82,15 @@ class MidigenTitans(nn.Module):
 
 # Mamba Block 정의 (LayerNorm + Mamba + Residual)
 class MambaBlock(nn.Module):
-    def __init__(self, dim, d_state=16, d_conv=4, expand=2):
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2, headdim=8):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-        self.mamba = Mamba(
+        self.mamba = Mamba2(
             d_model=dim, 
             d_state=d_state, 
             d_conv=d_conv, 
-            expand=expand
+            expand=expand,
+            headdim=headdim
         )
         
     def forward(self, x):
@@ -115,7 +116,8 @@ class MidigenMamba(nn.Module):
                 dim=self.dim,
                 d_state=mamba_cfg.d_state,
                 d_conv=mamba_cfg.d_conv,
-                expand=mamba_cfg.expand
+                expand=mamba_cfg.expand,
+                headdim=mamba_cfg.head_dim
             ) for _ in range(cfg.model.depth)
         ])
         
