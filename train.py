@@ -32,7 +32,7 @@ def main(cfg: DictConfig):
     model = MidiGenModule(cfg, vocab_size=actual_vocab_size)
 
     # 4. 콜백 설정
-    checkpoint_dir = os.path.join("checkpoints", cfg.project_name)
+    checkpoint_dir = cfg.paths.checkpoints
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Save config to checkpoint directory for easy reference

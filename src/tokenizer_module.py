@@ -169,7 +169,10 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
 
     def _load_composer_map(self):
         """composer_map.json이 있으면 로드하여 vocab을 확장함"""
-        map_path = Path("composer_map.json")
+        # Config에서 경로를 가져오거나 기본값 사용
+        vocab_path = self.config.get("vocab_path", ".")
+        map_path = Path(vocab_path) / "composer_map.json"
+        
         if map_path.exists():
             with open(map_path, "r") as f:
                 data = json.load(f)
@@ -409,6 +412,9 @@ def get_tokenizer(cfg: omegaconf.DictConfig) -> BaseTokenizer:
         # Pass the remi specific config
         return RemiTokenizerWrapper(cfg.tokenizer.remi)
     elif tokenizer_name == "anticipation":
+        # Inject vocab path from global config to tokenizer config
+        if hasattr(cfg, 'paths') and hasattr(cfg.paths, 'vocab'):
+             cfg.tokenizer.anticipation.vocab_path = cfg.paths.vocab
         # Pass the anticipation specific config.
         return AnticipationTokenizerWrapper(cfg.tokenizer.anticipation)
     else:

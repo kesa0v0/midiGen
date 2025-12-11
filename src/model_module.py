@@ -3,7 +3,7 @@ import torch
 from torch.optim import AdamW
 from transformers import GPT2Config, GPT2LMHeadModel
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-from src.models import MidigenTitans
+from src.models import MidigenTitans, MidigenMamba
 
 class MidiGenModule(pl.LightningModule):
     def __init__(self, cfg, vocab_size=None):
@@ -42,6 +42,8 @@ class MidiGenModule(pl.LightningModule):
             # Titans 모델 초기화
             # vocab_size를 명시적으로 전달하여 정합성 보장
             self.model = MidigenTitans(cfg, vocab_size=self.vocab_size)
+        elif cfg.model.type == "mamba":
+            self.model = MidigenMamba(cfg, vocab_size=self.vocab_size)
         else:
             raise NotImplementedError(f"Model type '{cfg.model.type}' not implemented")        
 

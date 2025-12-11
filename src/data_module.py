@@ -94,12 +94,14 @@ class MidiDataModule(pl.LightningDataModule):
         composer_to_id = {name: i for i, name in enumerate(composers)}
         
         # Tokenizer가 이 파일을 로드해서 Vocab을 확장함
-        with open("composer_map.json", "w") as f:
+        composer_map_path = os.path.join(self.cfg.paths.vocab, "composer_map.json")
+        os.makedirs(os.path.dirname(composer_map_path), exist_ok=True)
+        with open(composer_map_path, "w") as f:
             json.dump({
                 "composer_to_id": composer_to_id,
                 "count": len(composers)
             }, f, indent=4)
-        log.info(f">> [DataModule] 작곡가 맵 저장됨 (총 {len(composers)}명)")
+        log.info(f">> [DataModule] 작곡가 맵 저장됨 (총 {len(composers)}명) -> {composer_map_path}")
 
         # 2) 경로 및 작곡가 정보 준비
         midi_paths = [os.path.join(self.cfg.data.raw_path, x) for x in df['midi_filename']]

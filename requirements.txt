@@ -1,3 +1,5 @@
+ninja
+packaging
 torch
 torchaudio
 hydra-core
