@@ -1,19 +1,28 @@
 # configs/config.yaml
 
-project_name: "midigen_v4"
+project_name: "midigen_v5_mamba_anticipation"
+
+paths:
+  root: "${hydra:runtime.cwd}/result/${project_name}"
+  data: "${paths.root}/data"
+  processed_data: "${paths.data}/processed"
+  checkpoints: "${paths.root}/checkpoints"
+  logs: "${paths.root}/logs"
+  outputs: "${paths.root}/outputs"
+  vocab: "${paths.root}/vocab"
 
 defaults:
   - _self_
 
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: "${paths.logs}/${now:%Y-%m-%d}/${now:%H-%M-%S}"
 
 data:
   # 데이터 경로 (상대 경로 주의)
   raw_path: "${hydra:runtime.cwd}/data/raw/maestro-v3.0.0"
   csv_path: "${hydra:runtime.cwd}/data/raw/maestro-v3.0.0/maestro-v3.0.0.csv"
-  processed_path: "${hydra:runtime.cwd}/data/processed/maestro_tokenized"
+  processed_path: "${paths.processed_data}"
 
 tokenizer:
   name: anticipation # remi or anticipation

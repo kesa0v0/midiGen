@@ -59,7 +59,7 @@ def main(cfg: DictConfig):
     token_map = {original_id: i for i, original_id in enumerate(sorted_tokens)}
     
     # 저장
-    vocab_file = Path("data/processed/anticipation_vocab_map.json")
+    vocab_file = Path(cfg.paths.vocab) / "anticipation_vocab_map.json"
     vocab_file.parent.mkdir(parents=True, exist_ok=True)
     
     with open(vocab_file, "w") as f:

@@ -14,4 +14,6 @@ COPY requirements.txt .
 
 RUN pip install -r requirements.txt
 
+RUN pip install mamba-ssm causal-conv1d --no-binary mamba-ssm,causal-conv1d
+
 CMD ["/bin/bash"]

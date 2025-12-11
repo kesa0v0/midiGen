@@ -18,7 +18,7 @@ def main(cfg: DictConfig):
 
     # 2. 모델 & 토크나이저 로드
     tokenizer = get_tokenizer(cfg)
-    ckpt_dir = Path("checkpoints") / cfg.project_name
+    ckpt_dir = Path(cfg.paths.checkpoints)
     ckpts = sorted(ckpt_dir.glob("*.ckpt"), key=os.path.getmtime)
     if not ckpts: return
     
@@ -89,7 +89,8 @@ def main(cfg: DictConfig):
 
         # 중간 저장 (혹시 꺼질까봐)
         if (i + 1) % 1 == 0:
-            save_path = Path(f"generated_output/{cfg.project_name}/infinite_temp.mid")
+            save_path = Path(cfg.paths.outputs) / "infinite_temp.mid"
+            save_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 valid_tokens = [t for t in full_song_ids if t < tokenizer.vocab_size]
                 tokenizer.decode(valid_tokens, save_path)
@@ -98,7 +99,8 @@ def main(cfg: DictConfig):
     # ==========================================
     # 💾 최종 저장
     # ==========================================
-    final_path = Path(f"generated_output/{cfg.project_name}/titans_{target_composer.replace(' ', '_')}_full_length.mid")
+    final_path = Path(cfg.paths.outputs) / f"titans_{target_composer.replace(' ', '_')}_full_length.mid"
+    final_path.parent.mkdir(parents=True, exist_ok=True)
     valid_tokens = [t for t in full_song_ids if t < tokenizer.vocab_size]
     
     log.info(f">> 최종 변환 중... (총 {len(valid_tokens)} 토큰)")

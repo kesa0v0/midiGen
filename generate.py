@@ -25,7 +25,7 @@ def main(cfg: DictConfig):
 
     # 3. 모델 수동 초기화 (load_from_checkpoint 대신 사용)
     # 이유: assign=True 옵션을 사용하고, 컴파일된 접두사를 제거하기 위함
-    ckpt_dir = Path("checkpoints") / cfg.project_name
+    ckpt_dir = Path(cfg.paths.checkpoints)
     ckpts = sorted(ckpt_dir.glob("*.ckpt"), key=os.path.getmtime)
     if not ckpts:
         log.error(f"!! 체크포인트가 없습니다: {ckpt_dir}")
@@ -102,7 +102,7 @@ def main(cfg: DictConfig):
 
     final_midi_ids = [t for t in final_sequence if t < tokenizer.vocab_size]
     
-    output_dir = Path("generated_output") / cfg.project_name
+    output_dir = Path(cfg.paths.outputs)
     os.makedirs(output_dir, exist_ok=True)
     
     save_filename = f"titans_{target_composer.replace(' ', '_')}_len{len(final_midi_ids)}.mid"
