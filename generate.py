@@ -91,8 +91,8 @@ def main(cfg: DictConfig):
         generated_ids = model_module.model.generate(
             input_ids, 
             max_length=cfg.target_length,
-            temperature=0.75,
-            filter_kwargs=dict(min_p=0.1),
+            temperature=0.6,
+            filter_kwargs=dict(min_p=0.2),
             show_progress=True
         )
 
