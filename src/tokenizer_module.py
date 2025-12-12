@@ -255,7 +255,7 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
                     notes_data.append((start_sec, duration, inst_idx, note.pitch, vel_idx))
             
             # Sort by Onset time
-            notes_data.sort(key=lambda x: x[0])
+            notes_data.sort(key=lambda x: (x[0], x[3]))
             
             # 2. Convert to Tokens with Time Segmentation
             amt_tokens = []
