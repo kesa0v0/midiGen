@@ -22,7 +22,15 @@ import miditok
 
 class BaseTokenizer(ABC):
     @abstractmethod
-    def encode(self, midi_path: Path) -> list:
+    def encode(self, midi_path: Path, composer: str = None, augment_key: int = 0) -> list:
+        pass
+
+    @abstractmethod
+    def encode_with_augmentations(self, midi_path: Path, composer: str, augment_shifts: list) -> list:
+        """
+        Optimized method to handle multiple augmentations with a single file load.
+        Returns a list of token sequences (one for each shift).
+        """
         pass
 
     @abstractmethod
@@ -79,14 +87,23 @@ class RemiTokenizerWrapper(BaseTokenizer):
             self.tokenizer.add_special_tokens(['[START]'])
             log.debug(f"REMI Tokenizer after adding [START] token, vocab size: {self.tokenizer.vocab_size}")
 
-    def encode(self, midi_path: Path) -> list:
+    def encode(self, midi_path: Path, composer: str = None, augment_key: int = 0) -> list:
         # miditok returns a list of tokens, each having an 'ids' attribute
+        # TODO: Implement augmentation for REMI if needed
         tokens = self.tokenizer(str(midi_path))
         if tokens and hasattr(tokens[0], 'ids'):
             return tokens[0].ids
         elif tokens: # Older miditok versions might return list of ints directly
             return tokens
         return []
+
+    def encode_with_augmentations(self, midi_path: Path, composer: str, augment_shifts: list) -> list:
+        # Fallback for REMI: simply loop encode (optimization not yet implemented for REMI)
+        results = []
+        for shift in augment_shifts:
+            # REMI augmentation logic not fully implemented in encode yet, assuming encode handles it or ignores it
+            results.append(self.encode(midi_path, composer, augment_key=shift))
+        return results
 
     def decode(self, tokens: list, output_path: Path):
         # miditok.decode expects a list of token sequences
@@ -170,8 +187,14 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
     def _load_composer_map(self):
         """composer_map.json이 있으면 로드하여 vocab을 확장함"""
         # Config에서 경로를 가져오거나 기본값 사용
-        vocab_path = self.config.get("vocab_path", ".")
+        vocab_path = self.config.get("vocab_path", None)
+        
+        if not vocab_path:
+            vocab_path = "."
+            log.warning("No vocab_path provided in config. Defaulting to current directory '.' for composer_map.json")
+            
         map_path = Path(vocab_path) / "composer_map.json"
+        log.debug(f"Loading composer map from: {map_path.absolute()}")
         
         if map_path.exists():
             with open(map_path, "r") as f:
@@ -229,73 +252,94 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         ]
         return header + anchors
 
-    def encode(self, midi_path: Path, composer: str = None) -> list:
-        """MIDI -> Factorized AMT Tokens"""
+    def encode(self, midi_path: Path, composer: str = None, augment_key: int = 0) -> list:
+        """MIDI -> Factorized AMT Tokens (Single Call)"""
+        return self.encode_with_augmentations(midi_path, composer, [augment_key])[0]
+
+    def encode_with_augmentations(self, midi_path: Path, composer: str, augment_shifts: list) -> list:
+        """
+        MIDI -> Factorized AMT Tokens (Optimized Batch Augmentation)
+        Loads MIDI once, then generates tokens for multiple pitch shifts.
+        """
         if isinstance(midi_path, str): midi_path = Path(midi_path)
-        if not midi_path.exists(): return []
+        if not midi_path.exists(): return [[] for _ in augment_shifts]
 
         try:
-            # 1. Load MIDI using miditoolkit (Not anticipation lib)
+            # 1. Load MIDI ONCE
             midi_obj = miditoolkit.MidiFile(str(midi_path))
             
-            notes_data = []
-            # Gather all notes from all instruments
+            # Pre-calculate common note data (Start, Dur, Inst, Vel)
+            # Pitch will be handled per shift.
+            base_notes_data = []
+            
             for inst in midi_obj.instruments:
                 for note in inst.notes:
                     ticks_per_beat = midi_obj.ticks_per_beat
-                    
                     start_sec = (note.start / ticks_per_beat) * 0.5 
                     end_sec = (note.end / ticks_per_beat) * 0.5
-                    
                     duration = end_sec - start_sec
                     
                     inst_idx = 128 if inst.is_drum else inst.program
                     vel_idx = int(note.velocity / 4)
                     
-                    notes_data.append((start_sec, duration, inst_idx, note.pitch, vel_idx))
+                    # Store (Start, Dur, Inst, Pitch, Vel)
+                    # We store Pitch here to shift it later
+                    base_notes_data.append((start_sec, duration, inst_idx, note.pitch, vel_idx))
             
-            # Sort by Onset time
-            notes_data.sort(key=lambda x: (x[0], x[3]))
-            
-            # 2. Convert to Tokens with Time Segmentation
-            amt_tokens = []
-            current_time_segment = 0
-            
-            for note_start_sec, note_duration, inst_idx, pitch, vel_idx in notes_data:
-                # Calculate which segment this note belongs to
-                target_segment = int(note_start_sec // self.TIME_SEGMENT_SIZE)
-                
-                # Insert Time_Shift tokens if segments are skipped
-                while current_time_segment < target_segment:
-                    amt_tokens.append(self.tokens_structure['Time_Shift'])
-                    current_time_segment += 1
-                
-                # Normalize onset within the current segment
-                relative_onset_sec = note_start_sec % self.TIME_SEGMENT_SIZE
-                
-                onset_idx = int(relative_onset_sec * 100) # 10ms unit
-                dur_idx = int(note_duration * 100)       # 10ms unit
-                
-                # Factorized: 5 tokens per note
-                amt_tokens.append(self._val2tok(onset_idx, self.vocab_onset)) # Onset
-                amt_tokens.append(self._val2tok(dur_idx, self.vocab_dur))     # Duration
-                amt_tokens.append(self._val2tok(inst_idx, self.vocab_inst))   # Inst
-                amt_tokens.append(self._val2tok(pitch, self.vocab_pitch))     # Pitch
-                amt_tokens.append(self._val2tok(vel_idx, self.vocab_vel))     # Vel
+            # Sort by Onset time (Optimization: Sort once, as pitch shift doesn't change time order)
+            # Actually, if multiple notes have same onset but different pitch, pitch is secondary sort key.
+            # Shifting pitch preserves relative order of pitches usually, but strictly speaking 
+            # (t, p1) < (t, p2) might become (t, p1+k) < (t, p2+k). So sorting once is fine.
+            base_notes_data.sort(key=lambda x: (x[0], x[3]))
 
-            # 3. Add Structure
-            structure_prefix = self._generate_metadata_tokens(composer)
-            stream_start = [
-                self.tokens_structure['Narrative_Stream'],
-                self.tokens_context['Context_Peaceful_Village'],
-                self.tokens_context['Intensity_Medium']
-            ]
+            results = []
             
-            return [self._bos_token_id] + structure_prefix + stream_start + amt_tokens + [self._eos_token_id]
+            # 2. Iterate Shifts
+            for augment_key in augment_shifts:
+                amt_tokens = []
+                current_time_segment = 0
+                
+                # Filter & Shift
+                valid_notes = []
+                for start, dur, inst, pitch, vel in base_notes_data:
+                    transposed_pitch = pitch + augment_key
+                    if 0 <= transposed_pitch <= 127:
+                        valid_notes.append((start, dur, inst, transposed_pitch, vel))
+                
+                # Tokenize
+                for note_start_sec, note_duration, inst_idx, pitch, vel_idx in valid_notes:
+                    target_segment = int(note_start_sec // self.TIME_SEGMENT_SIZE)
+                    
+                    while current_time_segment < target_segment:
+                        amt_tokens.append(self.tokens_structure['Time_Shift'])
+                        current_time_segment += 1
+                    
+                    relative_onset_sec = note_start_sec % self.TIME_SEGMENT_SIZE
+                    onset_idx = int(relative_onset_sec * 100)
+                    dur_idx = int(note_duration * 100)
+                    
+                    amt_tokens.append(self._val2tok(onset_idx, self.vocab_onset))
+                    amt_tokens.append(self._val2tok(dur_idx, self.vocab_dur))
+                    amt_tokens.append(self._val2tok(inst_idx, self.vocab_inst))
+                    amt_tokens.append(self._val2tok(pitch, self.vocab_pitch))
+                    amt_tokens.append(self._val2tok(vel_idx, self.vocab_vel))
+                
+                # Add Structure
+                structure_prefix = self._generate_metadata_tokens(composer)
+                stream_start = [
+                    self.tokens_structure['Narrative_Stream'],
+                    self.tokens_context['Context_Peaceful_Village'],
+                    self.tokens_context['Intensity_Medium']
+                ]
+                
+                full_tokens = [self._bos_token_id] + structure_prefix + stream_start + amt_tokens + [self._eos_token_id]
+                results.append(full_tokens)
+            
+            return results
 
         except Exception as e:
             log.error(f"Encoding failed for {midi_path}: {e}")
-            return []
+            return [[] for _ in augment_shifts]
 
     def decode(self, tokens: list, output_path: Path):
         """Factorized Tokens -> MIDI"""

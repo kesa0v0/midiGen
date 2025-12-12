@@ -4,12 +4,13 @@ import glob
 import random
 import numpy as np
 import pandas as pd
+import itertools
 
 from functools import partial
 from multiprocessing import Pool, cpu_count
 
 from tqdm import tqdm
-from tqdm.contrib.concurrent import process_map
+# from tqdm.contrib.concurrent import process_map # Removed to avoid memory overhead
 from loguru import logger as log
 import logging
 from functools import partial
@@ -32,35 +33,42 @@ def _process_midi_file(item, cfg_dict, seq_len, stride, tokenizer_name):
     
     cfg = OmegaConf.create(cfg_dict)
     
+    # [Augmentation] Load shifts from config, default to [0] if not present
+    augmentation_shifts = cfg.data.get("augmentation_shifts", [0])
+    
+    all_chunks = []
+    
     try:
         tokenizer = get_tokenizer(cfg)
-        # [핵심] tokenizer.encode에 composer 전달
-        tokens_ids = tokenizer.encode(path, composer=composer)
-        if not tokens_ids: return []
-
-        chunks = []
-        # 긴 곡을 여러 개의 짧은 시퀀스로 자르기 (데이터 증강 효과)
-        for i in range(0, len(tokens_ids) - seq_len, stride):
-            chunk = tokens_ids[i : i + seq_len]
-            
-            # [수정] 의미 없는 침묵 구간 필터링 (Silence Filtering)
-            note_count = 0
-            # REMI tokenizer specific check logic
-            if tokenizer_name == "remi":
-                 for t in chunk:
-                    token_str = tokenizer.tokenizer[t] 
-                    if token_str.startswith("Pitch") or token_str.startswith("NoteOn"):
-                        note_count += 1
-            else: 
-                # Placeholder for anticipation
-                note_count += 100 
-
-            # 1. 길이는 충분한가?
-            # 2. 음표가 충분히 많은가?
-            if len(chunk) >= seq_len // 2 and note_count > 50:
-                chunks.append(chunk)
         
-        return chunks
+        # [Optimization] Load MIDI ONCE and get all augmented versions
+        all_augmented_tokens = tokenizer.encode_with_augmentations(path, composer=composer, augment_shifts=augmentation_shifts)
+
+        for tokens_ids in all_augmented_tokens:
+            if not tokens_ids: continue
+
+            # 긴 곡을 여러 개의 짧은 시퀀스로 자르기 (데이터 증강 효과)
+            for i in range(0, len(tokens_ids) - seq_len, stride):
+                chunk = tokens_ids[i : i + seq_len]
+                
+                # [수정] 의미 없는 침묵 구간 필터링 (Silence Filtering)
+                note_count = 0
+                # REMI tokenizer specific check logic
+                if tokenizer_name == "remi":
+                     for t in chunk:
+                        token_str = tokenizer.tokenizer[t] 
+                        if token_str.startswith("Pitch") or token_str.startswith("NoteOn"):
+                            note_count += 1
+                else: 
+                    # Placeholder for anticipation
+                    note_count += 100 
+
+                # 1. 길이는 충분한가?
+                # 2. 음표가 충분히 많은가?
+                if len(chunk) >= seq_len // 2 and note_count > 50:
+                    all_chunks.append(chunk)
+        
+        return all_chunks
 
     except Exception as e:
         # log.warning(f"Failed to process {path}: {e}") # 너무 많이 뜨면 시끄러움
@@ -125,22 +133,31 @@ class MidiDataModule(pl.LightningDataModule):
 
         log.info(f">> 병렬 토큰화 시작 (총 {len(midi_paths)}곡)...")
         
-        # process_map을 사용하여 병렬 처리 실행
-        # max_workers는 CPU 코어 수만큼 자동 할당됨
-        results = process_map(
-            partial(_process_midi_file, cfg_dict=cfg_dict, seq_len=seq_len, stride=stride, tokenizer_name=tokenizer_name),
-            process_items, # [수정] items 전달
-            chunksize=10,
-            desc="Tokenizing MIDI files"
-        )
-
-        # 결과 리스트 평탄화 (Flatten)
-        all_token_ids = [chunk for result in results for chunk in result]
-
-        log.info(f">> 생성된 시퀀스 개수: {len(all_token_ids)}")
+        # [Memory Optimization] Limit workers and chunksize
+        safe_workers = min(os.cpu_count() or 1, 4) 
+        
+        # [True Streaming] Use Pool.imap instead of process_map
+        # This avoids collecting all results in memory before creating the dataset.
+        def streaming_generator():
+            with Pool(processes=safe_workers) as pool:
+                # partial function application
+                process_func = partial(_process_midi_file, cfg_dict=cfg_dict, seq_len=seq_len, stride=stride, tokenizer_name=tokenizer_name)
+                
+                # imap yields results as they complete
+                # chunksize=1 keeps memory footprint per worker low
+                iterator = pool.imap(process_func, process_items, chunksize=1)
+                
+                # Wrap with tqdm for progress bar
+                for result_chunks in tqdm(iterator, total=len(process_items), desc="Streaming Tokenization"):
+                    for chunk in result_chunks:
+                        yield {'input_ids': chunk}
 
         # 4) 데이터셋 저장
-        full_dataset = Dataset.from_dict({'input_ids': all_token_ids})
+        # from_generator automatically handles streaming and caching to arrow file on disk
+        log.info(">> Creating Dataset from streaming generator...")
+        full_dataset = Dataset.from_generator(streaming_generator)
+
+        log.info(f">> 생성된 시퀀스 개수: {len(full_dataset)}")
 
         # Train/Val 분리 (9:1)
         split_dataset = full_dataset.train_test_split(test_size=0.1)
