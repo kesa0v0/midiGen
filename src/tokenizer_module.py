@@ -414,7 +414,8 @@ def get_tokenizer(cfg: omegaconf.DictConfig) -> BaseTokenizer:
     elif tokenizer_name == "anticipation":
         # Inject vocab path from global config to tokenizer config
         if hasattr(cfg, 'paths') and hasattr(cfg.paths, 'vocab'):
-             cfg.tokenizer.anticipation.vocab_path = cfg.paths.vocab
+            with omegaconf.open_dict(cfg.tokenizer.anticipation):
+                cfg.tokenizer.anticipation.vocab_path = cfg.paths.vocab
         # Pass the anticipation specific config.
         return AnticipationTokenizerWrapper(cfg.tokenizer.anticipation)
     else:

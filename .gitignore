@@ -226,3 +226,4 @@ lightning_logs/
 
 tokenizer.json
 composer_map.json
+result/

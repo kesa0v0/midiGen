@@ -26,7 +26,7 @@ data:
 
 tokenizer:
   name: anticipation # remi or anticipation
-  max_seq_len: 2048
+  max_seq_len: 4096
   remi:
     beat_res: "{(0, 4): 8, (4, 12): 4}" # Beat resolution for miditok
     nb_velocities: 24 # Number of velocity bins, renamed from num_velocities
@@ -44,15 +44,15 @@ tokenizer:
 model:
   type: "mamba"
   dim: 512
-  depth: 8
+  depth: 12
   heads: 8
 
   # Mamba 전용 설정
   mamba:
-    d_state: 16        # SSM 상태 크기 (보통 16 고정)
+    d_state: 64        # SSM 상태 크기 (보통 16 고정)
     d_conv: 4          # 로컬 컨볼루션 크기 (보통 4)
     expand: 2          # 내부 확장 비율 (보통 2)
-    headdim: 8       # 어텐션 헤드 차원
+    head_dim: 8       # 어텐션 헤드 차원
 
   titan:
     # 1. 공통 & Neural Memory 설정
@@ -76,7 +76,9 @@ train:
   batch_size: 8
   accumulate_grad_batches: 4
   epochs: 100
-  lr: 1e-3
+  lr: 5e-4
+  weight_decay: 0.1  # AdamW 기본값 (과적합 방지)
+  gradient_clip_val: 1.0 # 폭발 방지
   force_preprocess: false # true to regenerate data with new seq_len
   resume_ckpt_path: "auto"  # "auto"면 최신 체크포인트, 비우면 처음부터
 

@@ -91,9 +91,10 @@ def main(cfg: DictConfig):
         generated_ids = model_module.model.generate(
             input_ids, 
             max_length=cfg.target_length,
-            temperature=0.6,
-            filter_kwargs=dict(min_p=0.2),
-            show_progress=True
+            temperature=0.9,
+            top_k=40,            # 추가: 상위 40개 토큰 중 샘플링
+            top_p=0.9,           # 추가: 누적 확률 90% 내에서 샘플링
+            repetition_penalty=1.0  # (선택) 반복 제어
         )
 
     # 6. 저장
