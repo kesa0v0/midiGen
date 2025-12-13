@@ -82,7 +82,7 @@ class MidigenTitans(nn.Module):
 
 # Mamba Block 정의 (LayerNorm + Mamba + Residual)
 class MambaBlock(nn.Module):
-    def __init__(self, dim, d_state=16, d_conv=4, expand=2, headdim=8):
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2, headdim=8, layer_idx=None):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
         self.mamba = Mamba2(
@@ -90,12 +90,15 @@ class MambaBlock(nn.Module):
             d_state=d_state, 
             d_conv=d_conv, 
             expand=expand,
-            headdim=headdim
+            headdim=headdim,
+            layer_idx=layer_idx
         )
         
-    def forward(self, x):
+    def forward(self, x, inference_params=None):
         # Residual Connection
-        return x + self.mamba(self.norm(x))
+        return x + self.mamba(self.norm(x), inference_params=inference_params)
+
+from mamba_ssm.utils.generation import InferenceParams
 
 class MidigenMamba(nn.Module):
     def __init__(self, cfg, vocab_size=None):
@@ -117,25 +120,42 @@ class MidigenMamba(nn.Module):
                 d_state=mamba_cfg.d_state,
                 d_conv=mamba_cfg.d_conv,
                 expand=mamba_cfg.expand,
-                headdim=mamba_cfg.head_dim
-            ) for _ in range(cfg.model.depth)
+                headdim=mamba_cfg.head_dim,
+                layer_idx=i
+            ) for i in range(cfg.model.depth)
         ])
         
         # 3. 출력층
         self.norm_f = nn.LayerNorm(self.dim)
         self.head = nn.Linear(self.dim, self.vocab_size, bias=False)
 
-    def forward(self, input_ids, labels=None):
+    def forward(self, input_ids, labels=None, inference_params=None):
         b, n = input_ids.shape
         device = input_ids.device
         
-        # 위치 임베딩
-        positions = torch.arange(n, device=device)
+        # 위치 임베딩 계산
+        if inference_params is None:
+            # 학습 모드 (전체 시퀀스)
+            positions = torch.arange(n, device=device)
+        else:
+            # 추론 모드 (Step-by-step): 현재 시점의 위치 정보 사용
+            # inference_params.seqlen_offset은 현재까지 처리된 길이
+            positions = torch.arange(
+                inference_params.seqlen_offset, 
+                inference_params.seqlen_offset + n, 
+                device=device
+            )
+            
+        # [Safety] 위치 인덱스가 Positional Embedding 범위를 넘지 않도록 처리
+        # 학습된 길이보다 길어질 경우 순환(modulo)시키는 방법 적용.
+        max_pos_idx = self.pos_emb.num_embeddings
+        positions = positions % max_pos_idx
+
         x = self.token_emb(input_ids) + self.pos_emb(positions)
         
         # Mamba 통과
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, inference_params=inference_params)
             
         x = self.norm_f(x)
         logits = self.head(x)
@@ -149,42 +169,99 @@ class MidigenMamba(nn.Module):
             
         return CausalLMOutput(loss=loss, logits=logits)
 
-    # 생성 함수 (Autoregressive)
+    # 생성 함수 (Autoregressive with State Caching)
     def generate(self, input_ids, max_length=512, temperature=1.0, top_k=40, top_p=0.9, repetition_penalty=1.0, **kwargs):
-        # Mamba는 전체 시퀀스를 다시 넣어도 연산량이 선형(Linear)이라 빠릅니다.
-        # 최적화된 step-by-step inference도 가능하지만, 구현 편의를 위해 일단 전체 입력 방식을 씁니다.
+        from tqdm import tqdm
         
-        model_max_len = self.pos_emb.num_embeddings
+        print(f"Debug: Starting Fast Mamba generation (Stateful). Current length: {input_ids.shape[1]}, Target: {max_length}")
+        pbar = tqdm(total=max_length, initial=input_ids.shape[1], desc="Generating Tokens", dynamic_ncols=True)
         
-        while input_ids.shape[1] < max_length:
-            # 입력 길이 제한 (Positional Embedding 한계 때문)
-            curr_input = input_ids if input_ids.shape[1] < model_max_len else input_ids[:, -model_max_len:]
-            
-            outputs = self(curr_input)
+        # 1. InferenceParams 초기화
+        # max_seqlen: 최대 길이, max_batch_size: 배치 크기
+        inference_params = InferenceParams(
+            max_seqlen=max_length, 
+            max_batch_size=input_ids.shape[0]
+        )
+        
+        # 2. Prefill (초기 입력 처리)
+        # 전체 프롬프트를 한 번에 넣어서 상태(State)를 초기화합니다.
+        # 이때는 autoregressive하게 하나씩 할 필요 없이 한 번에 밀어넣습니다.
+        with torch.no_grad():
+            outputs = self(input_ids, inference_params=inference_params)
             next_token_logits = outputs.logits[:, -1, :]
             
+            # 다음 토큰 샘플링을 위한 준비
+            # (Prefill 단계에서는 마지막 토큰의 Logit만 필요함)
+            
+            # --- 첫 번째 토큰 샘플링 (Prefill 직후) ---
             # 후처리 (Sampling)
             if repetition_penalty != 1.0:
-                for i in range(input_ids.shape[0]):
-                    for token in set(input_ids[i].tolist()):
-                        if next_token_logits[i, token] < 0:
-                            next_token_logits[i, token] *= repetition_penalty
-                        else:
-                            next_token_logits[i, token] /= repetition_penalty
+                # [Optimization] Vectorized Repetition Penalty (GPU)
+                # 이전: CPU Loop & Set (Very Slow) -> 변경: Torch Scatter (Very Fast)
+                score = torch.gather(next_token_logits, 1, input_ids)
+                
+                # if score < 0 then score * penalty else score / penalty
+                score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
+                
+                next_token_logits.scatter_(1, input_ids, score)
 
             # Top-K / Top-P / Temperature
+
             if temperature != 1.0:
                 next_token_logits = next_token_logits / temperature
-                
             probs = torch.softmax(next_token_logits, dim=-1)
-            
-            # (생략 가능) 간단한 Top-K 구현
             if top_k > 0:
                 v, _ = torch.topk(probs, top_k)
                 probs[probs < v[:, [-1]]] = 0
                 probs = probs / probs.sum(dim=-1, keepdim=True)
-                
             next_token = torch.multinomial(probs, 1)
-            input_ids = torch.cat([input_ids, next_token], dim=-1)
             
+            # 결과 저장 및 입력 업데이트
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            pbar.update(1)
+            
+            # InferenceParams의 offset 업데이트 (Prefill 길이만큼)
+            # mamba_ssm 버전에 따라 자동으로 업데이트 될 수도 있지만, 
+            # 보통 forward 내부에서 처리되거나 명시적으로 관리해야 함.
+            # self(..., inference_params) 호출 시 내부에서 seqlen_offset을 사용하므로,
+            # 다음 step을 위해 올바르게 증가했는지 확인 필요.
+            # Mamba 구현체는 보통 forward 호출 시 inference_params.seqlen_offset을 *읽고*, 
+            # 내부 상태를 업데이트합니다. *하지만* offset 변수 자체를 자동으로 증가시키진 않을 수 있음.
+            # 안전하게 수동 관리:
+            inference_params.seqlen_offset += (input_ids.shape[1] - 1) - inference_params.seqlen_offset
+            
+            
+        # 3. Decoding (Step-by-step)
+        while input_ids.shape[1] < max_length:
+            # 이전 단계에서 뽑은 'next_token' 하나만 입력으로 사용
+            curr_input = next_token
+            
+            with torch.no_grad():
+                # Step forward
+                outputs = self(curr_input, inference_params=inference_params)
+                next_token_logits = outputs.logits[:, -1, :] # (B, Vocab)
+                
+                # Sampling
+                if repetition_penalty != 1.0:
+                    # [Optimization] Vectorized Repetition Penalty (GPU)
+                    score = torch.gather(next_token_logits, 1, input_ids)
+                    score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
+                    next_token_logits.scatter_(1, input_ids, score)
+
+                if temperature != 1.0:
+                    next_token_logits = next_token_logits / temperature
+                probs = torch.softmax(next_token_logits, dim=-1)
+                if top_k > 0:
+                    v, _ = torch.topk(probs, top_k)
+                    probs[probs < v[:, [-1]]] = 0
+                    probs = probs / probs.sum(dim=-1, keepdim=True)
+                next_token = torch.multinomial(probs, 1)
+                
+                input_ids = torch.cat([input_ids, next_token], dim=-1)
+                
+                # Offset 증가
+                inference_params.seqlen_offset += 1
+                pbar.update(1)
+
+        pbar.close()
         return input_ids

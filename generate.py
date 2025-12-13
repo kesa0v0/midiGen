@@ -13,7 +13,8 @@ log = logging.getLogger(__name__)
 def main(cfg: DictConfig):
     # 1. 설정 및 디바이스 준비
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log.info(f"=== Titans(MAC) 작곡 시작 (Device: {device}) ===")
+    model_type = cfg.model.type.upper() if hasattr(cfg, "model") else "UNKNOWN"
+    log.info(f"=== {model_type} 작곡 시작 (Device: {device}) ===")
     
     # [중요] 추론 시에는 컴파일 기능을 끕니다 (오류 방지)
     if hasattr(cfg, "compile_model"):
@@ -91,10 +92,10 @@ def main(cfg: DictConfig):
         generated_ids = model_module.model.generate(
             input_ids, 
             max_length=cfg.target_length,
-            temperature=0.7,
-            top_k=40,            # 추가: 상위 40개 토큰 중 샘플링
-            top_p=0.9,           # 추가: 누적 확률 90% 내에서 샘플링
-            repetition_penalty=1.1  # (선택) 반복 제어
+            temperature=0.5,     # [수정] 1.0 -> 0.8 (멜로디 일관성 강화)
+            top_k=20,            # [수정] 40 -> 20 (엉뚱한 음표 배제)
+            top_p=0.9,           # 누적 확률 90%
+            repetition_penalty=1.0  # 음악 구조 토큰(악기, 박자) 억제 방지
         )
 
     # 6. 저장
