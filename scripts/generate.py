@@ -63,39 +63,66 @@ def main(cfg: DictConfig):
     model_module.to(device)
     model_module.eval()
     
-    # 4. 프롬프트 생성 (Conditioning)
+    PRIMING_MIDI_PATH = "data/raw/maestro-v3.0.0/2004/MIDI-Unprocessed_Schubert4-6_MID--AUDIO_10_R2_2018_wav.midi"
+    
     start_tokens = [tokenizer.start_token_id]
     
-    # Global Header
-    if 'Global_Header' in tokenizer.tokens_structure:
+    # (1) Global Header (Anticipation 호환성 유지)
+    if hasattr(tokenizer, 'tokens_structure') and 'Global_Header' in tokenizer.tokens_structure:
         start_tokens.append(tokenizer.tokens_structure['Global_Header'])
     
-    # 작곡가 선택
+    # (2) 작곡가 선택 (REMI에서는 무시됨)
     target_composer = cfg.target_composer
     if hasattr(tokenizer, 'composer_map') and target_composer in tokenizer.composer_map:
         composer_id = tokenizer.composer_vocab_start + tokenizer.composer_map[target_composer]
         start_tokens.append(composer_id)
         log.info(f">> 선택된 작곡가: {target_composer} (ID: {composer_id})")
-    else:
-        log.warning(f"!! 작곡가 '{target_composer}'를 찾을 수 없습니다.")
-
-    # Narrative Stream
-    if 'Narrative_Stream' in tokenizer.tokens_structure:
+    
+    # (3) Narrative Stream (Anticipation 호환성 유지)
+    if hasattr(tokenizer, 'tokens_structure') and 'Narrative_Stream' in tokenizer.tokens_structure:
         start_tokens.append(tokenizer.tokens_structure['Narrative_Stream'])
 
-    input_ids = torch.tensor([start_tokens], device=device).long()
+    # (4) [핵심] 프라이밍(Priming): 반주 지옥 탈출을 위한 강제 주입
+    priming_tokens = []
+    if os.path.exists(PRIMING_MIDI_PATH):
+        log.info(f">> 프라이밍(Priming) 시도: {PRIMING_MIDI_PATH} 참고 중...")
+        try:
+            # MIDI 파일을 토큰으로 변환 (REMI 토크나이저 사용)
+            full_tokens = tokenizer.encode(PRIMING_MIDI_PATH)
+            
+            # 앞에서부터 200개 정도 자르기 (도입부~초반 멜로디)
+            # 너무 길면 생성할 공간이 줄어드니 적당히 자릅니다.
+            priming_tokens = full_tokens[:200]
+            
+            # 중복된 시작 토큰 제거
+            if priming_tokens and priming_tokens[0] == tokenizer.start_token_id:
+                priming_tokens = priming_tokens[1:]
+                
+            log.info(f">> 프라이밍 토큰 {len(priming_tokens)}개 주입 완료! (반주 패턴 탈출 유도)")
+        except Exception as e:
+            log.warning(f"!! 프라이밍 파일 로드 실패 (기본 모드로 시작합니다): {e}")
+    else:
+        # 경로가 틀렸거나 파일이 없으면 경고 메시지를 띄우고 그냥 진행합니다.
+        log.warning(f"!! 프라이밍 MIDI 파일을 찾을 수 없습니다: {PRIMING_MIDI_PATH}")
+        log.warning("   -> 경로를 확인하거나, 그냥 깡통(BOS) 상태로 시작합니다.")
+
+    # 최종 입력: [Start] + [Metadata] + [Priming(멜로디)]
+    final_input_tokens = start_tokens + priming_tokens
+    input_ids = torch.tensor([final_input_tokens], device=device).long()
 
     # 5. 생성 (Generation)
-    log.info(f">> 생성 시작... 목표 길이: {cfg.target_length} 토큰")
+    # 프라이밍 길이만큼 목표 길이를 늘려줍니다.
+    total_target_len = cfg.target_length + len(priming_tokens)
+    log.info(f">> 생성 시작... (입력: {len(final_input_tokens)} -> 목표: {total_target_len})")
     
     with torch.no_grad():
         generated_ids = model_module.model.generate(
             input_ids, 
-            max_length=cfg.target_length,
-            temperature=0.5,     # [수정] 1.0 -> 0.8 (멜로디 일관성 강화)
-            top_k=20,            # [수정] 40 -> 20 (엉뚱한 음표 배제)
-            top_p=0.9,           # 누적 확률 90%
-            repetition_penalty=1.0  # 음악 구조 토큰(악기, 박자) 억제 방지
+            max_length=total_target_len, 
+            temperature=1.0,     # 창의성 1.0 유지
+            top_k=80,            # 80 유지 (다양성 확보)
+            top_p=0.95,          # 0.95 유지
+            # repetition_penalty는 지원하지 않으므로 생략
         )
 
     # 6. 저장

@@ -3,6 +3,37 @@ import torch.nn as nn
 from titans_pytorch import MemoryAsContextTransformer
 from transformers.modeling_outputs import CausalLMOutput
 from mamba_ssm import Mamba2
+import logging
+
+log = logging.getLogger(__name__)
+
+# [New] Custom Filter Function for Top-K & Top-P
+def top_k_top_p_filter(logits, top_k=None, top_p=None):
+    """
+    Applies Top-K and Top-P filtering to logits.
+    """
+    if top_k is not None and top_k > 0:
+        k = min(top_k, logits.size(-1))
+        val, ind = torch.topk(logits, k)
+        probs = torch.full_like(logits, float('-inf'))
+        probs.scatter_(1, ind, val)
+        logits = probs
+
+    if top_p is not None and top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+        
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
+        
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+        
+        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+        logits[indices_to_remove] = float('-inf')
+        
+    return logits
 
 class MidigenTitans(nn.Module):
     def __init__(self, cfg, vocab_size=None):
@@ -63,14 +94,26 @@ class MidigenTitans(nn.Module):
         if seq_len_to_gen <= 0:
             return input_ids
 
+        # Prepare filter kwargs
+        filter_kwargs = {}
+        if 'top_k' in kwargs:
+            filter_kwargs['top_k'] = kwargs['top_k']
+        if 'top_p' in kwargs:
+            filter_kwargs['top_p'] = kwargs['top_p']
+            
+        # Temperature handling (passed directly to sample)
+        temperature = kwargs.get('temperature', 1.0)
+
         # sample()은 전체 시퀀스가 아니라 '생성된 부분'만 반환할 수도 있고, 
         # '전체'를 반환할 수도 있습니다 (라이브러리 버전에 따라 다름).
         # 보통 titans-pytorch는 전체 시퀀스를 반환하는 경향이 있습니다.
         sampled = self.model.sample(
             input_ids, 
             seq_len_to_gen,
-            **kwargs
-            # temperature 등은 sample 함수 내부 기본값 사용 또는 필요시 **kwargs 파싱해서 전달
+            use_cache=True, # [중요] 속도 최적화: 캐시 사용 활성화 (O(N) -> O(1))
+            temperature=temperature,
+            filter_fn=top_k_top_p_filter, # [Fix] Use custom filter for Top-K/Top-P
+            filter_kwargs=filter_kwargs
         )
         
         # 만약 입력보다 길이가 짧거나 같으면(오류 상황 등), 그냥 입력 반환

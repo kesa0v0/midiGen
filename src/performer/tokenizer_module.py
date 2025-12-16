@@ -3,6 +3,7 @@ from pathlib import Path
 import omegaconf
 import numpy as np
 import miditoolkit
+from miditok import REMI, TokenizerConfig
 from midiutil import MIDIFile
 import os
 import json
@@ -59,42 +60,41 @@ class BaseTokenizer(ABC):
 
 class RemiTokenizerWrapper(BaseTokenizer):
     def __init__(self, config: omegaconf.DictConfig):
-        # Dynamically evaluate beat_res
+        # 설정값 가져오기
         beat_res = eval(config.beat_res) if isinstance(config.beat_res, str) else config.beat_res
+        num_velocities = config.nb_velocities if hasattr(config, 'nb_velocities') else 32
         
-        # miditok expects nb_velocities, our config uses num_velocities
-        nb_velocities = config.nb_velocities if hasattr(config, 'nb_velocities') else 32
-        
-        additional_tokens_config = {
-            'Chord': config.get('use_chords', False),
-            'Rest': config.get('use_rests', False),
-            'Program': config.get('use_programs', False),
-            'Tempo': config.get('use_tempos', False),
-            'time_signature': config.get('use_time_signatures', False),
-            'rest_range': eval(config.get('rest_range', '[2, 8]')) if isinstance(config.get('rest_range'), str) else config.get('rest_range', [2, 8]),
-            'tempo_range': eval(config.get('tempo_range', '[50, 200]')) if isinstance(config.get('tempo_range'), str) else config.get('tempo_range', [50, 200]),
-            'ProgramChanges': config.get('use_program_changes', False)
-        }
-        
-        self.tokenizer = miditok.REMI(
+        # [수정 1] TokenizerConfig 설정 (use_sos_eos=True 추가)
+        tokenizer_config = TokenizerConfig(
             beat_res=beat_res,
-            nb_velocities=nb_velocities,
-            additional_tokens=additional_tokens_config
+            num_velocities=num_velocities,
+            use_chords=config.get('use_chords', False),
+            use_rests=config.get('use_rests', False),
+            use_programs=config.get('use_programs', False),
+            use_tempos=config.get('use_tempos', False),
+            use_time_signatures=config.get('use_time_signatures', False),
+            use_program_changes=config.get('use_program_changes', False),
+            use_sos_eos=True, # <--- [중요] BOS(시작), EOS(끝) 토큰 활성화
+            rest_range=eval(config.get('rest_range', '[2, 8]')) if isinstance(config.get('rest_range'), str) else config.get('rest_range', [2, 8]),
+            tempo_range=eval(config.get('tempo_range', '[50, 200]')) if isinstance(config.get('tempo_range'), str) else config.get('tempo_range', [50, 200]),
         )
+        
+        # 토크나이저 초기화
+        self.tokenizer = REMI(tokenizer_config=tokenizer_config)
+        
         log.debug(f"Initialized REMI Tokenizer with vocab size: {self.tokenizer.vocab_size}")
-        # Ensure [START] token is added and recognized
-        if '[START]' not in self.tokenizer._token_to_id:
-            self.tokenizer.add_special_tokens(['[START]'])
-            log.debug(f"REMI Tokenizer after adding [START] token, vocab size: {self.tokenizer.vocab_size}")
 
     def encode(self, midi_path: Path, composer: str = None, augment_key: int = 0) -> list:
-        # miditok returns a list of tokens, each having an 'ids' attribute
-        # TODO: Implement augmentation for REMI if needed
-        tokens = self.tokenizer(str(midi_path))
-        if tokens and hasattr(tokens[0], 'ids'):
-            return tokens[0].ids
-        elif tokens: # Older miditok versions might return list of ints directly
-            return tokens
+        # miditok v3는 encode 호출 시 MIDI 객체나 경로를 받음
+        tokens = self.tokenizer.encode(str(midi_path))
+        # v3에서는 tokens가 list[int]가 아니라 Tokenizer output 객체일 수 있음. 
+        # 보통 ids 속성이나 리스트 자체를 반환함. 확인 필요하지만, 보통 ids를 씀.
+        if hasattr(tokens, 'ids'):
+            return tokens.ids
+        elif isinstance(tokens, list) and isinstance(tokens[0], int): # list of ints
+             return tokens
+        elif isinstance(tokens, list) and hasattr(tokens[0], 'ids'): # list of objects
+             return tokens[0].ids
         return []
 
     def encode_with_augmentations(self, midi_path: Path, composer: str, augment_shifts: list) -> list:
@@ -120,7 +120,7 @@ class RemiTokenizerWrapper(BaseTokenizer):
 
     @property
     def start_token_id(self) -> int:
-        return self.tokenizer['[START]']
+        return self.tokenizer['BOS_None']
 
     @property
     def bar_token_id(self) -> int:
@@ -155,9 +155,9 @@ class AnticipationTokenizerWrapper(BaseTokenizer):
         self.special_token_offset = 100 
         
         # Ranges definition (Offset, Count)
-        # 1. Onset: 0 ~ 100s (10ms unit) -> 10000 tokens
-        self.vocab_onset = (self.special_token_offset, 10000) 
-        self.TIME_SEGMENT_SIZE = 100.0 # seconds, for onset normalization
+        # 1. Onset: 0 ~ 2s (10ms unit) -> 200 tokens
+        self.vocab_onset = (self.special_token_offset, 200) 
+        self.TIME_SEGMENT_SIZE = 2.0 # seconds, for onset normalization
         
         # 2. Duration: 0 ~ 10s (10ms unit) -> 1000 tokens
         self.vocab_dur = (self.vocab_onset[0] + self.vocab_onset[1], 1000)
