@@ -6,7 +6,7 @@ from instrument_assigner import InstrumentRoleAssigner
 from midi_analyzer import MidiAnalyzer
 from midi_loader import MidiLoader
 from structure_extractor import StructureExtractor
-from validator import Validator
+from validator import PostValidator, PreValidator
 
 
 class DatasetBuilder:
@@ -16,6 +16,9 @@ class DatasetBuilder:
             return
 
         midi = midi_data.midi
+        if not PreValidator().validate(midi):
+            return
+
         analysis = MidiAnalyzer().analyze(midi)
         analysis["midi_type"] = midi_data.midi_type
         analysis["ticks_per_beat"] = midi_data.ticks_per_beat
@@ -31,7 +34,7 @@ class DatasetBuilder:
             analysis, sections, prog_extractor, ctrl_extractor, midi
         )
 
-        if not Validator().validate(conductor_bundle["sections"]):
+        if not PostValidator().validate(conductor_bundle["global"], conductor_bundle["sections"]):
             return
 
         DatasetExporter().export(
