@@ -13,7 +13,7 @@ class ConductorTokenGenerator:
         conductor_sections = []
 
         for sec in sections:
-            prog = prog_extractor.extract(midi, sec)
+            prog = prog_extractor.extract(midi, sec, analysis)
             ctrl = ctrl_extractor.extract(midi, sec)
 
             conductor_sections.append(
