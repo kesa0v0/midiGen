@@ -27,16 +27,15 @@ class DatasetBuilder:
         prog_extractor = ChordProgressionExtractor()
         ctrl_extractor = ControlTokenExtractor()
 
-        conductor_sections = ConductorTokenGenerator().generate(
+        conductor_bundle = ConductorTokenGenerator().generate(
             analysis, sections, prog_extractor, ctrl_extractor, midi
         )
 
-        if not Validator().validate(conductor_sections):
+        if not Validator().validate(conductor_bundle["sections"]):
             return
 
         DatasetExporter().export(
-            analysis,
+            conductor_bundle,
             instruments,
-            conductor_sections,
             output_path
         )
