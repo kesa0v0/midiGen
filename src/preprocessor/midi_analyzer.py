@@ -1,5 +1,7 @@
-import numpy as np
 from collections import Counter
+
+import numpy as np
+import pretty_midi
 
 
 class MidiAnalyzer:
