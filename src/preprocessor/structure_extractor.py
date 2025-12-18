@@ -1,6 +1,8 @@
 from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from models import Section, TimeSignature
 
 
@@ -79,10 +81,14 @@ class StructureExtractor:
         if len(filtered) >= 2 and (filtered[-1] - filtered[-2]) < self.min_section_bars:
             filtered.pop(-2)
 
-        sections: List[Section] = []
+        spans = []
         for idx in range(len(filtered) - 1):
-            start = filtered[idx]
-            end = filtered[idx + 1]
+            spans.append((filtered[idx], filtered[idx + 1]))
+
+        labels = self._label_sections(bars, spans)
+
+        sections: List[Section] = []
+        for idx, (start, end) in enumerate(spans):
             if start >= end:
                 continue
 
@@ -93,7 +99,7 @@ class StructureExtractor:
 
             sections.append(
                 Section(
-                    id=self._section_name(idx),
+                    id=labels[idx],
                     start_bar=start,
                     end_bar=end,
                     local_bpm=local_bpm,
@@ -152,13 +158,44 @@ class StructureExtractor:
         most = Counter(keys).most_common(1)[0][0]
         return most
 
-    def _section_name(self, idx: int) -> str:
-        base = ord("A") + idx
-        if base <= ord("Z"):
-            return chr(base)
-        # Beyond Z, continue with double letters: AA, AB, ...
-        idx -= 26
-        return chr(ord("A") + (idx // 26)) + chr(ord("A") + (idx % 26))
+    def _label_sections(self, bars: List[Dict], spans: List[tuple]) -> List[str]:
+        """
+        Heuristic labels: INTRO, VERSE, CHORUS, BRIDGE, OUTRO with numeric suffix if repeated.
+        """
+        if not spans:
+            return []
+
+        densities = []
+        velocities = []
+        for start, end in spans:
+            seg = bars[start:end]
+            dens = [b.get("note_count", 0) for b in seg]
+            vels = [b.get("mean_velocity") for b in seg if b.get("mean_velocity") is not None]
+            densities.append(float(sum(dens)) / max(1, len(dens)))
+            velocities.append(float(sum(vels)) / max(1, len(vels)) if vels else 0.0)
+
+        scores = [d + v * 0.1 for d, v in zip(densities, velocities)]
+        max_idx = int(np.argmax(scores)) if scores else 0
+        min_idx = int(np.argmin(scores)) if scores else 0
+
+        labels = []
+        counts = {"INTRO": 0, "VERSE": 0, "CHORUS": 0, "BRIDGE": 0, "OUTRO": 0}
+        for i, (start, end) in enumerate(spans):
+            bars_len = end - start
+            if i == 0:
+                label = "INTRO"
+            elif i == len(spans) - 1:
+                label = "OUTRO"
+            elif i == max_idx:
+                label = "CHORUS"
+            elif i == min_idx and bars_len >= 4:
+                label = "BRIDGE"
+            else:
+                label = "VERSE"
+            counts[label] += 1
+            suffix = f"_{counts[label]}" if counts[label] > 1 else ""
+            labels.append(label + suffix)
+        return labels
 
     def _time_sig_from_bar(self, bar: Dict) -> Optional[TimeSignature]:
         ts = bar.get("time_sig")

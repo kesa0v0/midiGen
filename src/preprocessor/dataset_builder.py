@@ -19,10 +19,11 @@ class DatasetBuilder:
         if not PreValidator().validate(midi):
             return
 
-        analysis = MidiAnalyzer().analyze(midi)
+        analysis = MidiAnalyzer().analyze(midi, midi_path)
         analysis["midi_type"] = midi_data.midi_type
         analysis["ticks_per_beat"] = midi_data.ticks_per_beat
         analysis["channel_programs"] = midi_data.channel_programs
+        analysis["source_path"] = midi_path
 
         sections = StructureExtractor().extract_sections(midi, analysis)
         instruments = InstrumentRoleAssigner().assign(midi)
@@ -40,5 +41,6 @@ class DatasetBuilder:
         DatasetExporter().export(
             conductor_bundle,
             instruments,
-            output_path
+            output_path,
+            midi_path,
         )

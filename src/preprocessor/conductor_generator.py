@@ -19,6 +19,9 @@ class ConductorTokenGenerator:
         global_bpm, global_ts = self._global_defaults(analysis)
         global_key = analysis.get("global_key", None)
         grid_unit = self._grid_unit(analysis, global_ts)
+        midi_type = analysis.get("midi_type")
+        ticks_per_beat = analysis.get("ticks_per_beat")
+        channel_programs = analysis.get("channel_programs")
 
         conductor_sections = []
 
@@ -50,6 +53,10 @@ class ConductorTokenGenerator:
                 "time_sig": global_ts,
                 "key": global_key,
                 "grid_unit": grid_unit,
+                "midi_type": midi_type,
+                "ticks_per_beat": ticks_per_beat,
+                "channel_programs": channel_programs,
+                "form": self._build_form(sections),
             },
             "form": form,
             "sections": conductor_sections,

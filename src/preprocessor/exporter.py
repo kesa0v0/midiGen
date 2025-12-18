@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 class DatasetExporter:
     """
     Deterministic text export for conductor tokens.
@@ -10,7 +13,8 @@ class DatasetExporter:
         self,
         conductor_bundle,
         instruments,
-        output_path
+        output_path,
+        midi_path: str = ""
     ):
         global_meta = conductor_bundle["global"]
         form = conductor_bundle["form"]
@@ -62,5 +66,17 @@ class DatasetExporter:
 
         # Ensure trailing newline for UTF-8 text stability
         output_text = "\n".join(lines) + "\n"
-        with open(output_path, "w", encoding="utf-8", newline="\n") as f:
+        target_path = self._resolve_output_path(output_path, midi_path)
+        with open(target_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(output_text)
+
+    def _resolve_output_path(self, output_path, midi_path: str) -> str:
+        """
+        Enforce deterministic filename: <midi_stem>.tokens.txt when a directory or None is provided.
+        """
+        path_obj = Path(output_path) if output_path else None
+        if path_obj is None or path_obj.is_dir():
+            midi_stem = Path(midi_path).stem if midi_path else "output"
+            target = (path_obj or Path(".")).joinpath(f"{midi_stem}.tokens.txt")
+            return str(target)
+        return str(path_obj)

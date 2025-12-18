@@ -22,7 +22,7 @@ class BarInfo:
 
 
 class MidiAnalyzer:
-    def analyze(self, midi: pretty_midi.PrettyMIDI) -> dict:
+    def analyze(self, midi: pretty_midi.PrettyMIDI, midi_path: Optional[str] = None) -> dict:
         """
         Tempo/time-signature map + bar-wise statistics.
         """
@@ -35,6 +35,8 @@ class MidiAnalyzer:
 
         bars = self._compute_bars(midi, tempo_map, time_sig_map)
         bar_stats = self._compute_bar_stats(midi, bars)
+        global_key = self._global_key_from_bars(bar_stats)
+        grid_unit = self._estimate_grid_unit(midi, global_bpm)
 
         return {
             "global_bpm": global_bpm,
@@ -42,6 +44,8 @@ class MidiAnalyzer:
             "tempo_map": tempo_map,
             "time_sig_map": time_sig_map,
             "bars": bar_stats,
+            "global_key": global_key,
+            "grid_unit": grid_unit,
         }
 
     def _build_tempo_map(self, times: np.ndarray, tempi: np.ndarray) -> List[Dict[str, float]]:
@@ -208,3 +212,30 @@ class MidiAnalyzer:
         pitch_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         tonic = pitch_names[tonic_pc % 12]
         return f"{tonic}_{mode}"
+
+    def _global_key_from_bars(self, bars: List[Dict]) -> Optional[str]:
+        keys = [b.get("key_candidate") for b in bars if b.get("key_candidate") not in (None, "UNKNOWN")]
+        if not keys:
+            return None
+        from collections import Counter
+
+        return Counter(keys).most_common(1)[0][0]
+
+    def _estimate_grid_unit(self, midi: pretty_midi.PrettyMIDI, global_bpm: float) -> str:
+        notes = []
+        for inst in midi.instruments:
+            if inst.is_drum:
+                continue
+            notes.extend(inst.notes)
+        if not notes:
+            return "1/8"
+        min_len = min(max(0.0, n.end - n.start) for n in notes if n.end > n.start)
+        if min_len <= 0:
+            return "1/8"
+        beat_len = 60.0 / max(global_bpm, 1e-6)
+        frac = min_len / beat_len  # fraction of a beat
+        if frac <= 0.25:
+            return "1/16"
+        if frac <= 0.5:
+            return "1/8"
+        return "1/4"

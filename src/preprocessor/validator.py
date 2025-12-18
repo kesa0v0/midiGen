@@ -94,6 +94,12 @@ class PostValidator:
             return False
 
         grid_unit = global_block.get("grid_unit")
+        if grid_unit not in {"1/4", "1/8", "1/16"}:
+            return False
+
+        # MIDI metadata presence
+        if global_block.get("midi_type") is None or global_block.get("ticks_per_beat") is None:
+            return False
 
         for sec in sections:
             if not self._section_basic(sec):
