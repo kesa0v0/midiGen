@@ -148,7 +148,7 @@ class PostValidator:
 
     def _ctrl_valid(self, sec) -> bool:
         ctrl = sec.control_tokens
-        required_keys = {"DYN", "DEN", "MOV", "FILL", "FEEL"}
+        required_keys = {"DYN", "DEN", "MOV", "FILL", "FEEL", "LEAP", "SPACING"}
         if not required_keys.issubset(ctrl.keys()):
             return False
 
@@ -157,6 +157,8 @@ class PostValidator:
         mov_ok = ctrl["MOV"] in {"ASC", "DESC", "STATIC"}
         fill_ok = ctrl["FILL"] in {"YES", "NO"}
         feel_ok = ctrl["FEEL"] in {"STRAIGHT", "SWING"}
+        leap_ok = ctrl["LEAP"] in {"LOW", "MID", "HIGH"}
+        spacing_ok = ctrl["SPACING"] in {"NARROW", "WIDE"}
         energy_ok = True
         if "ENERGY" in ctrl:
             try:
@@ -164,7 +166,7 @@ class PostValidator:
                 energy_ok = 1 <= val <= 5
             except Exception:
                 energy_ok = False
-        return dyn_ok and den_ok and mov_ok and fill_ok and feel_ok and energy_ok
+        return dyn_ok and den_ok and mov_ok and fill_ok and feel_ok and leap_ok and spacing_ok and energy_ok
 
     def _music_sanity(self, sections) -> bool:
         all_chords = []

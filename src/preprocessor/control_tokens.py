@@ -20,6 +20,9 @@ class ControlTokenExtractor:
         den_dense: float = 6.0,
         mov_threshold: float = 3.0,
         fill_density_jump: float = 0.5,
+        leap_low: float = 2.0,
+        leap_high: float = 5.0,
+        spacing_wide: float = 12.0,
     ):
         self.dyn_low = dyn_low
         self.dyn_high = dyn_high
@@ -27,6 +30,9 @@ class ControlTokenExtractor:
         self.den_dense = den_dense
         self.mov_threshold = mov_threshold
         self.fill_density_jump = fill_density_jump
+        self.leap_low = leap_low
+        self.leap_high = leap_high
+        self.spacing_wide = spacing_wide
 
     def extract(self, midi, section: Section, analysis: Dict) -> Dict[str, str]:
         bars = analysis.get("bars", [])
@@ -43,6 +49,8 @@ class ControlTokenExtractor:
         fill = self._fill(sec_bars)
         energy = self._energy(sec_bars)
         feel = self._feel(midi, sec_bars)
+        leap = self._leap(midi, sec_bars)
+        spacing = self._spacing(midi, sec_bars)
 
         tokens = {
             "DYN": dyn,
@@ -50,6 +58,8 @@ class ControlTokenExtractor:
             "MOV": mov,
             "FILL": fill,
             "FEEL": feel,
+            "LEAP": leap,
+            "SPACING": spacing,
         }
         if energy is not None:
             tokens["ENERGY"] = str(energy)
@@ -154,6 +164,52 @@ class ControlTokenExtractor:
             return "SWING"
         return "STRAIGHT"
 
+    def _leap(self, midi, sec_bars: List[Dict]) -> str:
+        """
+        Section-level leapiness: average melodic interval size.
+        """
+        notes = [
+            n
+            for inst in midi.instruments
+            if not inst.is_drum
+            for n in inst.notes
+        ]
+        if len(notes) < 2:
+            return "LOW"
+        notes_sorted = sorted(notes, key=lambda n: n.start)
+        intervals = []
+        for i in range(1, len(notes_sorted)):
+            intervals.append(abs(notes_sorted[i].pitch - notes_sorted[i - 1].pitch))
+        if not intervals:
+            return "LOW"
+        mean_int = float(np.mean(intervals))
+        if mean_int <= self.leap_low:
+            return "LOW"
+        if mean_int <= self.leap_high:
+            return "MID"
+        return "HIGH"
+
+    def _spacing(self, midi, sec_bars: List[Dict]) -> str:
+        """
+        Harmonic spacing hint: average pitch span within bars (non-drum notes).
+        """
+        spans = []
+        for bar in sec_bars:
+            start, end = bar["start"], bar["end"]
+            pitches = [
+                n.pitch
+                for inst in midi.instruments
+                if not inst.is_drum
+                for n in inst.notes
+                if start <= n.start < end
+            ]
+            if len(pitches) >= 2:
+                spans.append(max(pitches) - min(pitches))
+        if not spans:
+            return "NARROW"
+        mean_span = float(np.mean(spans))
+        return "WIDE" if mean_span >= self.spacing_wide else "NARROW"
+
     def _default_tokens(self) -> Dict[str, str]:
         return {
             "DYN": "MID",
@@ -161,4 +217,6 @@ class ControlTokenExtractor:
             "MOV": "STATIC",
             "FILL": "NO",
             "FEEL": "STRAIGHT",
+            "LEAP": "LOW",
+            "SPACING": "NARROW",
         }
