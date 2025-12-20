@@ -51,7 +51,7 @@ class ChordProgressionExtractor:
 
         section_bars = bars[section.start_bar : section.end_bar]
         global_key = analysis.get("global_key")  # optional
-        section_key = section.local_key or self._key_from_bars(section_bars, global_key)
+        section_key = section.local_key or global_key
         grid_slots = max(1, int(slots_per_bar))
 
         prev_chord = None
@@ -195,7 +195,5 @@ class ChordProgressionExtractor:
         return [chord] + ["-"] * (slots - 1)
 
     def _key_from_bars(self, bars: List[Dict], global_key: Optional[str]) -> Optional[str]:
-        keys = [b.get("key_candidate") for b in bars if b.get("key_candidate") not in (None, "UNKNOWN")]
-        if keys:
-            return max(set(keys), key=keys.count)
+        # Deprecated: key is decided upstream (KeyDetector). Kept for compatibility.
         return global_key

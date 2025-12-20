@@ -3,6 +3,7 @@ from conductor_generator import ConductorTokenGenerator
 from control_tokens import ControlTokenExtractor
 from exporter import DatasetExporter
 from instrument_assigner import InstrumentRoleAssigner
+from key_detection import KeyDetector
 from midi_analyzer import MidiAnalyzer
 from midi_loader import MidiLoader
 from structure_extractor import StructureExtractor
@@ -26,6 +27,15 @@ class DatasetBuilder:
         analysis["source_path"] = midi_path
 
         sections = StructureExtractor().extract_sections(midi, analysis)
+        key_result = KeyDetector().detect(
+            midi_path,
+            [(sec.id, sec.start_bar, sec.end_bar) for sec in sections],
+        )
+        analysis["global_key"] = key_result.global_key
+        for sec in sections:
+            key_val = key_result.section_keys.get(sec.id)
+            sec.local_key = None if key_val in (None, "KEEP") else key_val
+
         instruments = InstrumentRoleAssigner().assign(midi)
 
         prog_extractor = ChordProgressionExtractor()
