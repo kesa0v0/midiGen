@@ -168,18 +168,15 @@ class ChordProgressionExtractor:
     def _degree_to_roman(self, degree: int, mode: str, quality: str) -> str:
         base_major = {
             0: "I",
-            1: "bII",
             2: "II",
-            3: "bIII",
             4: "III",
             5: "IV",
-            6: "bV",
             7: "V",
-            8: "bVI",
             9: "VI",
-            10: "bVII",
             11: "VII",
         }
+        if degree not in base_major:
+            return "N.C."
         base = base_major[degree]
         if mode == "MINOR":
             diatonic_minor = {0: "i", 2: "ii", 3: "iii", 5: "iv", 7: "v", 8: "VI", 10: "VII"}
