@@ -21,11 +21,13 @@ class StructureExtractor:
         density_jump: float = 0.6,
         velocity_jump: float = 20.0,
         centroid_jump: float = 5.0,
+        stat_persistence: int = 2,
     ):
         self.min_section_bars = min_section_bars
         self.density_jump = density_jump
         self.velocity_jump = velocity_jump
         self.centroid_jump = centroid_jump
+        self.stat_persistence = max(1, stat_persistence)
 
     def extract_sections(self, midi, analysis) -> List[Section]:
         bars = analysis.get("bars", [])
@@ -56,10 +58,15 @@ class StructureExtractor:
             if idx is not None:
                 breakpoints.add(idx)
 
-        # Abrupt bar-stat change detection
+        # Abrupt bar-stat change detection (softened: require consecutive signals)
+        stat_streak = 0
         for i in range(1, total_bars):
             if self._is_stat_change(bars[i - 1], bars[i]):
-                breakpoints.add(i)
+                stat_streak += 1
+                if stat_streak >= self.stat_persistence:
+                    breakpoints.add(i)
+            else:
+                stat_streak = 0
 
         # Repeating pattern detection (look for immediate repetition of 8 or 4-bar blocks)
         fingerprints = [self._bar_fingerprint(b) for b in bars]
