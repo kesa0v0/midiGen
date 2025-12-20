@@ -93,8 +93,8 @@ class StructureExtractor:
                 continue
 
             first_bar = bars[start]
-            local_ts = self._time_sig_from_bar(first_bar)
-            local_bpm = int(round(first_bar["bpm"])) if "bpm" in first_bar else None
+            local_ts = self._consistent_time_sig(bars[start:end])
+            local_bpm = self._consistent_bpm(bars[start:end])
             local_key = self._section_key_candidate(bars[start:end])
 
             sections.append(
@@ -196,6 +196,23 @@ class StructureExtractor:
             suffix = f"_{counts[label]}" if counts[label] > 1 else ""
             labels.append(label + suffix)
         return labels
+
+    def _consistent_time_sig(self, bars: List[Dict]) -> Optional[TimeSignature]:
+        if not bars:
+            return None
+        ts_set = {(b.get("time_sig")[0], b.get("time_sig")[1]) for b in bars if b.get("time_sig")}
+        if len(ts_set) == 1:
+            num, den = next(iter(ts_set))
+            return TimeSignature(num, den)
+        return None
+
+    def _consistent_bpm(self, bars: List[Dict]) -> Optional[int]:
+        if not bars:
+            return None
+        bpms = {int(round(b.get("bpm"))) for b in bars if b.get("bpm") is not None}
+        if len(bpms) == 1:
+            return bpms.pop()
+        return None
 
     def _time_sig_from_bar(self, bar: Dict) -> Optional[TimeSignature]:
         ts = bar.get("time_sig")

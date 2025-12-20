@@ -130,8 +130,12 @@ class PostValidator:
         actual_slots = sum(len(bar) for bar in sec.prog_grid)
         if expected_slots != actual_slots:
             return False
-        # Optional: check BPM/TIME_SIG consistency inside section
-        if sec.bpm and hasattr(sec, "local_bpm") and sec.local_bpm != sec.bpm:
+        # BPM/TIME_SIG consistency inside section: must be set or None, but not conflicting
+        if sec.local_bpm is None and sec.bpm is not None:
+            return False
+        if sec.local_bpm is not None and sec.bpm is not None and sec.local_bpm != sec.bpm:
+            return False
+        if sec.local_time_sig is None and sec.time_sig is not None:
             return False
         return True
 
