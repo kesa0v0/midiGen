@@ -44,7 +44,7 @@ class ChordProgressionExtractor:
             "m7": [0, 3, 7, 10],
         }
 
-    def extract(self, midi: pretty_midi.PrettyMIDI, section: Section, analysis: Dict) -> List[List[str]]:
+    def extract(self, midi: pretty_midi.PrettyMIDI, section: Section, analysis: Dict, slots_per_bar: int) -> List[List[str]]:
         bars = analysis.get("bars", [])
         if not bars:
             return []
@@ -52,7 +52,7 @@ class ChordProgressionExtractor:
         section_bars = bars[section.start_bar : section.end_bar]
         global_key = analysis.get("global_key")  # optional
         section_key = section.local_key or self._key_from_bars(section_bars, global_key)
-        grid_slots = self._slots_per_bar(section_bars[0])
+        grid_slots = max(1, int(slots_per_bar))
 
         prev_chord = None
         prog_grid: List[List[str]] = []
@@ -193,18 +193,6 @@ class ChordProgressionExtractor:
     def _fill_bar(self, chord: str, slots: int) -> List[str]:
         slots = max(1, slots)
         return [chord] + ["-"] * (slots - 1)
-
-    def _slots_per_bar(self, bar: Dict) -> int:
-        num, den = bar.get("time_sig", (4, 4))
-        grid = self.grid_unit  # "1/4", "1/8", "1/16"
-        try:
-            g_num, g_den = grid.split("/")
-            g_den = int(g_den)
-        except Exception:
-            g_den = 4
-        beats = num
-        slots_per_beat = max(1, g_den // den)
-        return max(1, int(beats * slots_per_beat))
 
     def _key_from_bars(self, bars: List[Dict], global_key: Optional[str]) -> Optional[str]:
         keys = [b.get("key_candidate") for b in bars if b.get("key_candidate") not in (None, "UNKNOWN")]

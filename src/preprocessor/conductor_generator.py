@@ -30,7 +30,8 @@ class ConductorTokenGenerator:
             local_ts = sec.local_time_sig or TimeSignature(*global_ts)
             local_key = sec.local_key or global_key
 
-            prog = prog_extractor.extract(midi, sec, analysis)
+            slots_per_bar = self._slots_per_bar(local_ts, grid_unit)
+            prog = prog_extractor.extract(midi, sec, analysis, slots_per_bar)
             ctrl = ctrl_extractor.extract(midi, sec, analysis)
 
             conductor_sections.append(
@@ -42,6 +43,7 @@ class ConductorTokenGenerator:
                     key=local_key,
                     prog_grid=prog,
                     control_tokens=ctrl,
+                    slots_per_bar=slots_per_bar,
                 )
             )
 
@@ -78,3 +80,14 @@ class ConductorTokenGenerator:
 
     def _build_form(self, sections):
         return [f"{s.id}({s.end_bar - s.start_bar})" for s in sections]
+
+    def _slots_per_bar(self, time_sig: TimeSignature, grid_unit: str) -> int:
+        num = time_sig.numerator
+        den = time_sig.denominator
+        try:
+            _, g_den = grid_unit.split("/")
+            g_den = int(g_den)
+        except Exception:
+            g_den = 4
+        slots = int(num * (g_den / den))
+        return max(1, slots)

@@ -123,7 +123,9 @@ class PostValidator:
         return True
 
     def _prog_slots(self, sec, grid_unit: Optional[str]) -> bool:
-        slots_per_bar = len(sec.prog_grid[0]) if sec.prog_grid else 0
+        slots_per_bar = getattr(sec, "slots_per_bar", None)
+        if slots_per_bar is None or slots_per_bar <= 0:
+            return False
         expected_slots = sec.bars * slots_per_bar
         actual_slots = sum(len(bar) for bar in sec.prog_grid)
         if expected_slots != actual_slots:
@@ -142,7 +144,7 @@ class PostValidator:
 
     def _ctrl_valid(self, sec) -> bool:
         ctrl = sec.control_tokens
-        required_keys = {"DYN", "DEN", "MOV", "FILL"}
+        required_keys = {"DYN", "DEN", "MOV", "FILL", "FEEL"}
         if not required_keys.issubset(ctrl.keys()):
             return False
 
@@ -150,6 +152,7 @@ class PostValidator:
         den_ok = ctrl["DEN"] in {"SPARSE", "NORMAL", "DENSE"}
         mov_ok = ctrl["MOV"] in {"ASC", "DESC", "STATIC"}
         fill_ok = ctrl["FILL"] in {"YES", "NO"}
+        feel_ok = ctrl["FEEL"] in {"STRAIGHT", "SWING"}
         energy_ok = True
         if "ENERGY" in ctrl:
             try:
@@ -157,7 +160,7 @@ class PostValidator:
                 energy_ok = 1 <= val <= 5
             except Exception:
                 energy_ok = False
-        return dyn_ok and den_ok and mov_ok and fill_ok and energy_ok
+        return dyn_ok and den_ok and mov_ok and fill_ok and feel_ok and energy_ok
 
     def _music_sanity(self, sections) -> bool:
         all_chords = []

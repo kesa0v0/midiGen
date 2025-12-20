@@ -27,3 +27,4 @@ class ConductorSection:
     key: Optional[str]
     prog_grid: List[List[str]]
     control_tokens: Dict[str, str]
+    slots_per_bar: int = 0

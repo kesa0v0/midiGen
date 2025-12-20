@@ -42,12 +42,14 @@ class ControlTokenExtractor:
         mov = self._mov(sec_bars)
         fill = self._fill(sec_bars)
         energy = self._energy(sec_bars)
+        feel = self._feel(midi, sec_bars)
 
         tokens = {
             "DYN": dyn,
             "DEN": den,
             "MOV": mov,
             "FILL": fill,
+            "FEEL": feel,
         }
         if energy is not None:
             tokens["ENERGY"] = str(energy)
@@ -110,10 +112,53 @@ class ControlTokenExtractor:
         energy = int(round((den_score + vel_score) / 2))
         return max(1, min(5, energy))
 
+    def _feel(self, midi, sec_bars: List[Dict]) -> str:
+        """
+        Estimate swing vs straight by measuring 8th-note swing ratio within beats.
+        """
+        ratios = []
+        notes = [
+            n
+            for inst in midi.instruments
+            if not inst.is_drum
+            for n in inst.notes
+        ]
+        if not notes:
+            return "STRAIGHT"
+
+        for bar in sec_bars:
+            bpm = bar.get("bpm", 120.0)
+            num, den = bar.get("time_sig", (4, 4))
+            beat_dur = (60.0 / max(bpm, 1e-6)) * (4.0 / den)
+            for b in range(int(num)):
+                beat_start = bar["start"] + b * beat_dur
+                beat_end = beat_start + beat_dur
+                onsets = sorted(n.start for n in notes if beat_start <= n.start < beat_end)
+                if len(onsets) < 2:
+                    continue
+                first, second = onsets[0], onsets[1]
+                if second <= beat_start or second >= beat_end:
+                    continue
+                dur1 = second - beat_start
+                dur2 = beat_end - second
+                if dur1 <= 0 or dur2 <= 0:
+                    continue
+                ratio = dur1 / dur2
+                ratios.append(ratio)
+
+        if not ratios:
+            return "STRAIGHT"
+
+        med = float(np.median(ratios))
+        if 1.5 <= med <= 2.5:
+            return "SWING"
+        return "STRAIGHT"
+
     def _default_tokens(self) -> Dict[str, str]:
         return {
             "DYN": "MID",
             "DEN": "NORMAL",
             "MOV": "STATIC",
             "FILL": "NO",
+            "FEEL": "STRAIGHT",
         }

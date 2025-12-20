@@ -7,7 +7,7 @@ class DatasetExporter:
     """
 
     ROLE_ORDER = ["MELODY", "HARMONY", "BASS", "DRUMS"]
-    CTRL_ORDER = ["DYN", "DEN", "MOV", "FILL", "ENERGY"]
+    CTRL_ORDER = ["DYN", "DEN", "MOV", "FILL", "FEEL", "ENERGY"]
 
     def export(
         self,
