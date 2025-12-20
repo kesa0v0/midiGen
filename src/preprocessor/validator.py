@@ -110,6 +110,8 @@ class PostValidator:
                 return False
             if not self._ctrl_valid(sec):
                 return False
+            if not self._hook_valid(sec):
+                return False
 
         if not self._music_sanity(sections):
             return False
@@ -167,6 +169,19 @@ class PostValidator:
             except Exception:
                 energy_ok = False
         return dyn_ok and den_ok and mov_ok and fill_ok and feel_ok and leap_ok and spacing_ok and energy_ok
+
+    def _hook_valid(self, sec) -> bool:
+        if sec.hook not in {"YES", "NO"}:
+            return False
+        if sec.hook_repeat not in {"IDENTICAL", "VARIATION"}:
+            return False
+        if sec.hook_role and sec.hook_role not in {"MELODY", "COUNTERMELODY", "MOTIF"}:
+            return False
+        if sec.hook_range and sec.hook_range not in {"NARROW", "WIDE"}:
+            return False
+        if sec.hook_rhythm and sec.hook_rhythm not in {"STRAIGHT", "SYNCOPATED"}:
+            return False
+        return True
 
     def _music_sanity(self, sections) -> bool:
         all_chords = []

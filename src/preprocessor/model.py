@@ -28,3 +28,8 @@ class ConductorSection:
     prog_grid: List[List[str]]
     control_tokens: Dict[str, str]
     slots_per_bar: int = 0
+    hook: Optional[str] = None
+    hook_repeat: Optional[str] = None
+    hook_role: Optional[str] = None
+    hook_range: Optional[str] = None
+    hook_rhythm: Optional[str] = None

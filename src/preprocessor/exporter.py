@@ -53,6 +53,14 @@ class DatasetExporter:
                 lines.append(f"TIME_SIG={sec.time_sig.numerator}/{sec.time_sig.denominator}")
             if sec.key is not None and sec.key != global_meta.get("key"):
                 lines.append(f"KEY={sec.key}")
+            lines.append(f"HOOK={sec.hook or 'NO'}")
+            lines.append(f"HOOK_REPEAT={sec.hook_repeat or 'VARIATION'}")
+            if sec.hook_role:
+                lines.append(f"HOOK_ROLE={sec.hook_role}")
+            if sec.hook_range:
+                lines.append(f"HOOK_RANGE={sec.hook_range}")
+            if sec.hook_rhythm:
+                lines.append(f"HOOK_RHYTHM={sec.hook_rhythm}")
 
             lines.append("PROG=")
             for bar in sec.prog_grid:
