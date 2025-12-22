@@ -29,7 +29,7 @@ class MidiLoader:
             return None
 
         try:
-            pm = pretty_midi.PrettyMIDI(midi_file=midi_file)
+            pm = pretty_midi.PrettyMIDI(path)
         except Exception as exc:
             print(f"[MidiLoader] Failed to parse MIDI with pretty_midi: {exc}")
             return None

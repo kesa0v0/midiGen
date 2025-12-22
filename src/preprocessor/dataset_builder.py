@@ -18,6 +18,7 @@ class DatasetBuilder:
 
         midi = midi_data.midi
         if not PreValidator().validate(midi):
+            print("[DatasetBuilder] Pre-validation failed.")
             return
 
         analysis = MidiAnalyzer().analyze(midi, midi_path)
@@ -46,6 +47,7 @@ class DatasetBuilder:
         )
 
         if not PostValidator().validate(conductor_bundle["global"], conductor_bundle["sections"]):
+            print("[DatasetBuilder] Post-validation failed.")
             return
 
         DatasetExporter().export(

@@ -25,36 +25,45 @@ class PreValidator:
         try:
             end_time = midi.get_end_time()
         except Exception:
+            print("[PreValidator] midi.get_end_time failed")
             return False
 
         # Basic length via bars heuristic (downbeats preferred)
         bars = midi.get_downbeats()
         if len(bars) < self.min_bars:
+            print(f"[PreValidator] too few bars ({len(bars)} < {self.min_bars})")
             return False
 
         # BPM checks
         tempos, tempi = midi.get_tempo_changes()
         if len(tempi) == 0:
+            print("[PreValidator] no tempo events")
             return False
         if any(t < self.min_bpm or t > self.max_bpm for t in tempi):
+            print(f"[PreValidator] tempo out of range {tempi}")
             return False
         if len(tempi) > self.max_tempo_changes:
+            print(f"[PreValidator] too many tempo changes ({len(tempi)})")
             return False
 
         # Time signature checks
         ts_changes = midi.time_signature_changes
         if not ts_changes:
+            print("[PreValidator] no time signature events")
             return False
         if len(ts_changes) > self.max_time_sig_changes:
+            print(f"[PreValidator] too many time signature changes ({len(ts_changes)})")
             return False
 
         # Note presence
         has_notes = any(inst.notes for inst in midi.instruments)
         if not has_notes:
+            print("[PreValidator] no notes in any track")
             return False
 
         # All tracks empty
         if all(len(inst.notes) == 0 for inst in midi.instruments):
+            print("[PreValidator] all tracks empty")
             return False
 
         return True
@@ -69,7 +78,7 @@ class PostValidator:
 
     def __init__(
         self,
-        max_sections: int = 20,
+        max_sections: int = 64,
         min_sections: int = 1,
         min_section_bars: int = 2,
         max_section_bars: int = 256,
@@ -86,34 +95,44 @@ class PostValidator:
     def validate(self, global_block: Dict, sections) -> bool:
         # Section count limits
         if not (self.min_sections <= len(sections) <= self.max_sections):
+            print(f"[PostValidator] invalid section count {len(sections)}")
             return False
 
         # FORM sanity: ensure form matches section order/lengths
         form = global_block.get("form", [])
         if form and len(form) != len(sections):
+            print("[PostValidator] form length mismatch")
             return False
 
         grid_unit = global_block.get("grid_unit")
         if grid_unit not in {"1/4", "1/8", "1/16"}:
+            print(f"[PostValidator] invalid grid_unit {grid_unit}")
             return False
 
         # MIDI metadata presence
         if global_block.get("midi_type") is None or global_block.get("ticks_per_beat") is None:
+            print("[PostValidator] missing midi_type or ticks_per_beat")
             return False
 
         for sec in sections:
             if not self._section_basic(sec):
+                print(f"[PostValidator] section basic failed: {sec.name}")
                 return False
             if not self._prog_slots(sec, grid_unit):
+                print(f"[PostValidator] prog slots mismatch: {sec.name}")
                 return False
             if self._has_forbidden_tokens(sec):
+                print(f"[PostValidator] forbidden token in section: {sec.name}")
                 return False
             if not self._ctrl_valid(sec):
+                print(f"[PostValidator] ctrl invalid: {sec.name}")
                 return False
             if not self._hook_valid(sec):
+                print(f"[PostValidator] hook invalid: {sec.name}")
                 return False
 
         if not self._music_sanity(sections):
+            print("[PostValidator] music sanity failed")
             return False
 
         return True
@@ -131,13 +150,6 @@ class PostValidator:
         expected_slots = sec.bars * slots_per_bar
         actual_slots = sum(len(bar) for bar in sec.prog_grid)
         if expected_slots != actual_slots:
-            return False
-        # BPM/TIME_SIG consistency inside section: must be set or None, but not conflicting
-        if sec.local_bpm is None and sec.bpm is not None:
-            return False
-        if sec.local_bpm is not None and sec.bpm is not None and sec.local_bpm != sec.bpm:
-            return False
-        if sec.local_time_sig is None and sec.time_sig is not None:
             return False
         return True
 
