@@ -85,7 +85,8 @@ class ChordProgressionExtractor:
 
         section_bars = bars[section.start_bar : section.end_bar]
         global_key = analysis.get("global_key")
-        section_key = section.local_key or global_key
+        # Roman 변환 시에는 global_key만 사용 (section_key가 'KEEP'이거나 None이면 global_key)
+        roman_key = global_key
         
         # Ensure slots_per_bar is valid
         slots_per_bar = max(1, int(slots_per_bar))
@@ -117,8 +118,8 @@ class ChordProgressionExtractor:
                 else:
                     running_chord = chord
 
-                # Tokenize: N.C. or Roman
-                token = "N.C." if chord is None else self._roman(chord, section_key)
+                # Tokenize: N.C. or Roman (항상 global_key 기준)
+                token = "N.C." if chord is None else self._roman(chord, roman_key)
                 
                 # Fill slots for this beat
                 # First slot gets the token, others get sustain "-"
