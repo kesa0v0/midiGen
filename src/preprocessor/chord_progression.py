@@ -141,6 +141,10 @@ class ChordProgressionExtractor:
     def _chord_for_window(self, midi: pretty_midi.PrettyMIDI, start: float, end: float, min_notes: int = 1) -> Optional[ChordCandidate]:
         hist = np.zeros(12, dtype=float)
         note_count = 0
+        
+        min_pitch = 128
+        bass_weight = 0.0
+
         for inst in midi.instruments:
             if inst.is_drum:
                 continue
@@ -150,9 +154,22 @@ class ChordProgressionExtractor:
                     weight = note.velocity * (overlap if overlap > 0 else 1.0)
                     hist[note.pitch % 12] += weight
                     note_count += 1
+                    
+                    # Bass Boost Logic: Track the lowest pitch in the window
+                    if note.pitch < min_pitch:
+                        min_pitch = note.pitch
+                        bass_weight = weight
+                    elif note.pitch == min_pitch:
+                        # If multiple notes have the same lowest pitch, take the max weight
+                        bass_weight = max(bass_weight, weight)
 
         if hist.sum() == 0 or note_count < min_notes:
             return None
+            
+        # Apply Bass Boost: Add extra weight to the bass note's pitch class
+        # Adding 2.0 * bass_weight brings the total contribution of the bass to ~3x (1x original + 2x boost)
+        if min_pitch < 128:
+            hist[min_pitch % 12] += bass_weight * 2.0
 
         best: Optional[ChordCandidate] = None
         for root in range(12):

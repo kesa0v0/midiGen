@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 
-from music21 import converter, stream, key as m21key
+from music21 import converter, stream, key as m21key, pitch as m21pitch
 
 
 @dataclass(frozen=True)
@@ -77,25 +77,94 @@ class KeyDetector:
         return KeyResult(global_key=global_key_str, section_keys=section_key_map)
 
     def _detect_global_key(self, score: stream.Score) -> Optional[m21key.Key]:
-        # 1) 전체에서 시도
+        # 1) music21 basic analysis
+        m21_key = None
         try:
             k = score.analyze("key")
             if isinstance(k, m21key.Key):
-                return k
+                m21_key = k
         except Exception:
             pass
+        
+        if not m21_key:
+             # Fallback to analyzing first 16 measures if full score analysis failed
+            try:
+                seg = score.measures(1, 16)
+                k = seg.analyze("key")
+                if isinstance(k, m21key.Key):
+                    m21_key = k
+            except Exception:
+                pass
 
-        # 2) 초반 일부(첫 16마디 근사)로 fallback
+        # 2) Heuristic Correction: Start/End Bass Note
+        # Pop music often starts and ends on the Tonic (I).
+        # If the bass note of the first and last measure match, use it as the tonic.
         try:
-            # music21 measure는 보통 1-based. 여기서는 1~16 measure 사용 시도
-            seg = score.measures(1, 16)
-            k = seg.analyze("key")
-            if isinstance(k, m21key.Key):
-                return k
-        except Exception:
+            start_bass = self._get_measure_bass(score, 1)
+            
+            # Find last measure number.
+            # Usually score.measures() gives access, but finding the index of the last measure is tricky.
+            # We try to get it from the parts.
+            last_measure_num = 0
+            if score.parts:
+                for p in score.parts:
+                    # Note: This is an approximation. 
+                    # Correctly finding the last measure with content can be complex.
+                    try:
+                        # getElementsByClass('Measure') returns a stream
+                        measures = p.getElementsByClass('Measure')
+                        if measures:
+                            last_measure_num = max(last_measure_num, measures[-1].number)
+                    except:
+                        pass
+            
+            end_bass = self._get_measure_bass(score, last_measure_num) if last_measure_num > 0 else None
+
+            if start_bass is not None and end_bass is not None and start_bass == end_bass:
+                heuristic_tonic = start_bass
+                
+                # If m21_key is None or its tonic disagrees with our strong heuristic
+                if m21_key is None or m21_key.tonic.pitchClass != heuristic_tonic:
+                    # Use the heuristic tonic.
+                    # Preserve mode from m21_key if available, else default to 'major'
+                    mode = m21_key.mode if m21_key and m21_key.mode in ['major', 'minor'] else 'major'
+                    
+                    # Create new Key object
+                    new_key = m21key.Key(tonic=m21pitch.Pitch(heuristic_tonic), mode=mode)
+                    return new_key
+
+        except Exception as e:
+            # If heuristics fail, ignore and return m21_key
             pass
 
-        return None
+        return m21_key
+
+    def _get_measure_bass(self, score: stream.Score, measure_num: int) -> Optional[int]:
+        """
+        Returns the pitch class (0-11) of the lowest note in the specified measure number.
+        """
+        try:
+            # score.measures returns a segment containing parts -> measures
+            # We need to flatten to find all notes in that measure timeframe across all parts.
+            measure_seg = score.measures(measure_num, measure_num)
+            
+            lowest = 128
+            found = False
+            
+            for n in measure_seg.flatten().notes:
+                if n.isNote:
+                    if n.pitch.midi < lowest:
+                        lowest = n.pitch.midi
+                        found = True
+                elif n.isChord:
+                    for p in n.pitches:
+                        if p.midi < lowest:
+                            lowest = p.midi
+                            found = True
+                            
+            return lowest % 12 if found else None
+        except:
+            return None
 
     def _detect_section_key(self, score: stream.Score, start_bar: int, end_bar: int) -> Optional[m21key.Key]:
         """
