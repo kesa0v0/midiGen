@@ -104,7 +104,11 @@ class ConductorTokenGenerator:
             is_chorus = "CHORUS" in sec_id_upper
             # prog_grid를 해시로 변환 (tuple로 변환 후 hash)
             prog_tuple = tuple(tuple(row) for row in csec.prog_grid)
-            repeat_type = "VARIATION"
+            # CHORUS는 기본적으로 IDENTICAL, 반복 출현이 있을 때만 VARIATION 허용
+            if is_chorus:
+                repeat_type = "IDENTICAL"
+            else:
+                repeat_type = "VARIATION"
             hook = "NO"
             # 반복 탐색: 동일 base_id의 이전 섹션과 코드 진행이 완전히 같으면 IDENTICAL
             base_id = sec.id.split('_')[0]
@@ -120,8 +124,9 @@ class ConductorTokenGenerator:
                         repeat_type = "IDENTICAL"
                         found_identical = True
                         break
-            # 첫 등장이어도 외부로는 VARIATION만 노출
-            # 내부적으로 is_first_occurrence로 필요시 추가 처리 가능
+                    # CHORUS 반복 출현이지만 코드가 다르면 VARIATION
+                    if is_chorus:
+                        repeat_type = "VARIATION"
             # HOOK 판정: CHORUS는 무조건 YES, 반복(IDENTICAL)이면 YES
             if is_chorus or repeat_type == "IDENTICAL":
                 hook = "YES"
@@ -129,7 +134,13 @@ class ConductorTokenGenerator:
                 hook = "NO"
             csec.hook = hook
             csec.hook_repeat = repeat_type
-            csec.hook_role = "MELODY" if hook == "YES" else "MOTIF"
+            # HOOK=NO일 때 HOOK_ROLE=MOTIF는 INTRO/BRIDGE만, 그 외는 None(생략)
+            if hook == "YES":
+                csec.hook_role = "MELODY"
+            elif base_id in ["INTRO", "BRIDGE"]:
+                csec.hook_role = "MOTIF"
+            else:
+                csec.hook_role = None
             csec.hook_range = self._hook_range(csec)
             csec.hook_rhythm = self._hook_rhythm(csec)
 
