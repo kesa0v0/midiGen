@@ -8,13 +8,41 @@ from typing import Optional, Dict, List
 # --- Configuration & Constants ---
 
 GENRE_KEYWORDS = {
-    'OST': ['game', 'soundtrack', 'film', 'movie', 'anime', 'theme', 'nintendo', 'psx'],
-    'CLASSIC': ['renaissance', 'baroque', 'classical', 'romantic', 'medieval', 'choral', 'opera', 'modern', 'contemporary'],
-    'ROCK': ['metal', 'punk', 'grunge', 'hardcore', 'alternative', 'indie', 'rock'],
-    'ELECTRONIC': ['techno', 'trance', 'house', 'edm', 'dubstep', 'drum&bass', 'electronica', 'dance', 'disco'],
-    'JAZZ': ['jazz', 'swing', 'big band', 'bop', 'fusion', 'blues'],
-    'FOLK': ['folk', 'country', 'traditional', 'world', 'reggae', 'latin', 'celtic', 'irish'],
-    'POP': ['pop', 'rnb', 'soul', 'funk', 'hits', 'oldies', 'karaoke', 'ballad']
+    'OST': [
+        'game', 'soundtrack', 'film', 'movie', 'anime', 'theme', 'nintendo', 'psx', 
+        'console', 'cinema', 'disney', 'broadway', 'musical', 'tv'
+    ],
+    'CLASSIC': [
+        'renaissance', 'baroque', 'classical', 'romantic', 'medieval', 'choral', 'opera', 
+        'modern', 'contemporary', 'gregorian', 'chamber', 'symphony', 'concerto',
+        'early 20th century', 'early20thcentury', 'ancient', # 시대 구분 추가
+        "waltz"
+    ],
+    'ROCK': [
+        'metal', 'punk', 'grunge', 'hardcore', 'alternative', 'indie', 'rock', 
+        'rockabilly', 'psychedelic', 'new wave'
+    ],
+    'ELECTRONIC': [
+        'techno', 'trance', 'house', 'edm', 'dubstep', 'drum&bass', 'electronica', 
+        'dance', 'disco', 'synth', 'eurodance', 'downtempo', 'breakbeat'
+    ],
+    'JAZZ': [
+        'jazz', 'swing', 'big band', 'bop', 'fusion', 'blues', 'ragtime', 'dixieland'
+    ],
+    'FOLK': [
+        'folk', 'country', 'traditional', 'world', 'reggae', 'latin', 'celtic', 'irish',
+        'bluegrass', 'spiritual', 'gospel', 'christian', 'praise', 'worship', # 종교/민속 음악
+        'italian', 'french', 'spanish', 'german', 'mexican', 'brazil', 'greek', # 국가명 (민요 등)
+        'polka', 'musette', 'calypso',
+        'danish', 'australian', 'dutch', 'japanese'
+    ],
+    'POP': [
+        'pop', 'rnb', 'soul', 'funk', 'hits', 'oldies', 'karaoke', 'ballad',
+        'rap', 'hip hop', 'hiphop', 'urban', # 힙합 계열 추가
+        'medley', 'duet', 'instrumental', 'instrumentals', # 기타 분류 애매한 것들을 팝으로 흡수
+        'party', 'wedding', 'holiday', 'christmas', 'children',
+        'novelty', 'motown', 'ballroom'
+    ]
 }
 
 # OST specific keywords for the scraped data priority check
@@ -104,8 +132,12 @@ def map_genre_and_style(row):
             return genre, normalize_text(scraped)
 
     # Priority 4: Unknown
-    style = normalize_text(curated) if (curated and curated != 'nan') else normalize_text(scraped)
-    return 'UNKNOWN', style
+    # 스타일이 비어있으면 'unknown_style'이라고 명시적으로 적어줌
+    final_style = normalize_text(curated) if (curated and curated != 'nan') else normalize_text(scraped)
+    if not final_style: 
+        final_style = "unknown_style"
+        
+    return 'UNKNOWN', final_style
 
 def main(input_path, output_path):
     print(f"Loading data from {input_path}...")
@@ -143,9 +175,9 @@ def main(input_path, output_path):
     # 2. total_notes >= 100
     df = df[df['total_notes'] >= 100]
     
-    # 3. audio_text_matches_score >= 0.5 (Optional but requested)
-    if 'audio_text_matches_score' in df.columns:
-        df = df[df['audio_text_matches_score'] >= 0.5]
+    # # 3. audio_text_matches_score >= 0.5 (Optional but requested)
+    # if 'audio_text_matches_score' in df.columns:
+    #     df = df[df['audio_text_matches_score'] >= 0.5]
     
     # 4. num_tracks != 0
     df = df[df['num_tracks'] != 0]
@@ -190,6 +222,14 @@ def main(input_path, output_path):
     genre_style = df.apply(map_genre_and_style, axis=1)
     df['genre'] = [x[0] for x in genre_style]
     df['style'] = [x[1] for x in genre_style]
+
+    # --- Step 3.5: Drop UNKNOWN Genre ---
+    print(f"Before dropping UNKNOWN: {len(df)}")
+    
+    # 장르가 UNKNOWN인 행 제거
+    df = df[df['genre'] != 'UNKNOWN']
+    
+    print(f"After dropping UNKNOWN: {len(df)}")
 
     # --- Step 4: Final Output ---
     print("Step 4: Saving final output...")

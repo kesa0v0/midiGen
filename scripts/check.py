@@ -1,21 +1,16 @@
-import csv
-from collections import Counter
+import pandas as pd
+df = pd.read_csv("data/processed/cleaned_metadata.csv")
+print(df['genre'].value_counts())
 
+# check_unknowns.py
+import pandas as pd
 
-csv.field_size_limit(10**7)
+# CSV 로드
+df = pd.read_csv("data/processed/cleaned_metadata.csv") # 또는 작업 중인 데이터프레임
 
-csv_path = "data/raw/Final-Metadata-Extended-GigaMIDI-Dataset-updated.csv"
-counter = Counter()
+# UNKNOWN인 것들만 필터링
+unknowns = df[df['genre'] == 'UNKNOWN']
 
-with open(csv_path, encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        styles = row["music_style_scraped"]
-        # 여러 스타일이 쉼표 등으로 구분되어 있다면 분리
-        for style in styles.split(","):
-            style = style.strip()
-            if style:
-                counter[style] += 1
-
-for style, count in counter.most_common():
-    print(f"{style}: {count}")
+# 도대체 원래 스타일이 뭐였는지 상위 20개 출력
+print("=== Top 20 Unknown Styles ===")
+print(unknowns['style'].value_counts().head(20))
