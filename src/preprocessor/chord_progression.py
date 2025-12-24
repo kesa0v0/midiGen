@@ -16,32 +16,66 @@ class ChordCandidate:
     score: float
 
 
+
 class ChordProgressionExtractor:
+
     """
-    Heuristic chord extraction (bar-level, 1 chord per bar, non-ML).
-    - Aggregate notes per bar
-    - Build pitch class histogram
-    - Pick best-fitting chord candidate
-    - Apply section/local key (fallback to global) to Roman numeral
-    - Fill bar grid with chord + sustains
-    - If bar is unstable, reuse previous chord
+    Strategic Compression Chord Extraction.
+    - Detection: High resolution (includes aug, dim7, etc.)
+    - Output: Compressed to 8 core tokens (Strategic Vocabulary)
+    - Mapping: Strict Chromatic Scale Degree (No functional interpretation)
+    - Resolution: Beat-level (1 chord per beat) to prevent hyperactivity
     """
+
+    def _slots_per_bar(self, bar: Dict) -> int:
+        num, den = bar.get("time_sig", (4, 4))
+        return int(num)
 
     def __init__(self, grid_unit: str = "1/4", min_notes: int = 2, min_confidence: float = 0.2):
         self.grid_unit = grid_unit
         self.min_notes = min_notes
         self.min_confidence = min_confidence
 
-        # Chord templates (relative pitch-class sets)
+        # 1. Detection Templates (Broad detection for accuracy)
         self.templates = {
             "maj": [0, 4, 7],
             "min": [0, 3, 7],
             "dim": [0, 3, 6],
-            "sus2": [0, 2, 7],
+            "aug": [0, 4, 8],          # Detect aug
+            "sus2": [0, 2, 7],         # Detect sus2
             "sus4": [0, 5, 7],
             "7": [0, 4, 7, 10],
             "maj7": [0, 4, 7, 11],
             "m7": [0, 3, 7, 10],
+            "dim7": [0, 3, 6, 9],      # Detect dim7
+            "m7b5": [0, 3, 6, 10],     # Detect m7b5
+        }
+
+        # 2. Strategic Vocabulary Mapping (Compression)
+        # Raw Quality -> Target Quality (Llama Vocabulary)
+        self.quality_map = {
+            # Major Family -> I
+            "maj": "maj",
+            "aug": "maj",  # Aug -> Major (Color removed)
+            "sus2": "maj", # Sus2 -> Major (Color removed)
+            
+            # Minor Family -> i
+            "min": "min",
+            
+            # 7th Family -> I7 / i7 / Imaj7
+            "7": "7",
+            "m7": "m7",
+            "maj7": "maj7",
+            
+            # Sus4 -> Isus4 (Function preserved)
+            "sus4": "sus4",
+            
+            # Diminished Family -> io7
+            "dim": "dim7", # Triad dim -> dim7 (Standardization)
+            "dim7": "dim7",
+            
+            # Half-diminished -> ih7 (Function preserved)
+            "m7b5": "m7b5",
         }
 
     def extract(self, midi: pretty_midi.PrettyMIDI, section: Section, analysis: Dict, slots_per_bar: int) -> List[List[str]]:
@@ -50,32 +84,62 @@ class ChordProgressionExtractor:
             return []
 
         section_bars = bars[section.start_bar : section.end_bar]
-        global_key = analysis.get("global_key")  # optional
+        global_key = analysis.get("global_key")
         section_key = section.local_key or global_key
-        grid_slots = max(1, int(slots_per_bar))
+        
+        # Ensure slots_per_bar is valid
+        slots_per_bar = max(1, int(slots_per_bar))
 
-        prev_chord = None
+        running_chord: Optional[ChordCandidate] = None
         prog_grid: List[List[str]] = []
+
         for bar in section_bars:
-            chord = self._chord_for_bar(midi, bar)
-            if chord is None or chord.score < self.min_confidence:
-                chord = prev_chord
+            bar_tokens: List[str] = []
+            
+            # Calculate beats to ensure beat-level resolution
+            num, den = bar.get("time_sig", (4, 4))
+            beats = max(1, int(num))
+            
+            # Calculate slots per beat (e.g., 4 slots / 4 beats = 1 slot/beat)
+            slots_per_beat = max(1, slots_per_bar // beats)
+            beat_dur = (bar["end"] - bar["start"]) / beats
 
-            if chord is None:
-                token = "N.C."
-            else:
-                token = self._roman(chord, section_key)
-                prev_chord = chord
+            for b in range(beats):
+                s_time = bar["start"] + b * beat_dur
+                e_time = s_time + beat_dur
 
-            prog_grid.append(self._fill_bar(token, grid_slots))
+                # Detect chord for this beat
+                chord = self._chord_for_window(midi, s_time, e_time, min_notes=self.min_notes)
+                
+                # Stabilization: Use running chord if detection is weak/empty
+                if chord is None or chord.score < self.min_confidence:
+                    chord = running_chord
+                else:
+                    running_chord = chord
+
+                # Tokenize: N.C. or Roman
+                token = "N.C." if chord is None else self._roman(chord, section_key)
+                
+                # Fill slots for this beat
+                # First slot gets the token, others get sustain "-"
+                bar_tokens.append(token)
+                for _ in range(slots_per_beat - 1):
+                    bar_tokens.append("-")
+
+            # Handle remainder slots if slots_per_bar isn't perfectly divisible
+            if len(bar_tokens) < slots_per_bar:
+                bar_tokens.extend(["-"] * (slots_per_bar - len(bar_tokens)))
+            elif len(bar_tokens) > slots_per_bar:
+                bar_tokens = bar_tokens[:slots_per_bar]
+
+            prog_grid.append(bar_tokens)
 
         return prog_grid
 
     # ---- Chord detection ----
-    def _chord_for_bar(self, midi: pretty_midi.PrettyMIDI, bar: Dict) -> Optional[ChordCandidate]:
-        start, end = bar["start"], bar["end"]
+    def _chord_for_window(self, midi: pretty_midi.PrettyMIDI, start: float, end: float, min_notes: int = 1) -> Optional[ChordCandidate]:
         hist = np.zeros(12, dtype=float)
-
+        note_count = 0
         for inst in midi.instruments:
             if inst.is_drum:
                 continue
@@ -84,8 +148,9 @@ class ChordProgressionExtractor:
                     overlap = max(0.0, min(note.end, end) - note.start)
                     weight = note.velocity * (overlap if overlap > 0 else 1.0)
                     hist[note.pitch % 12] += weight
+                    note_count += 1
 
-        if hist.sum() == 0 or bar.get("note_count", 0) < self.min_notes:
+        if hist.sum() == 0 or note_count < min_notes:
             return None
 
         best: Optional[ChordCandidate] = None
@@ -94,6 +159,12 @@ class ChordProgressionExtractor:
                 tpl = np.zeros(12)
                 tpl[[ (root + i) % 12 for i in intervals ]] = 1.0
                 score = self._cosine_similarity(hist, tpl)
+                # Triad Bias: 단순 코드(maj, min)에 가산점, sus4는 소폭 가산점
+                if quality in ["maj", "min"]:
+                    score += 0.15
+                elif quality in ["sus4"]:
+                    score += 0.05
+                # 7th, sus4 등은 점수가 확실히 높을 때만 선택됨
                 if best is None or score > best.score:
                     best = ChordCandidate(root, quality, score)
         return best
@@ -103,94 +174,81 @@ class ChordProgressionExtractor:
             return 0.0
         return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-    # ---- Roman numeral ----
+    # ---- Roman numeral Conversion (Strict) ----
     def _roman(self, chord: ChordCandidate, key: Optional[str]) -> str:
         root_pc = chord.root_pc
-        quality = chord.quality
+        
+        # 1. Simplify Quality (Map to 8 core types)
+        target_quality = self.quality_map.get(chord.quality, "maj")
+        
         if not key or key == "UNKNOWN":
-            return self._absolute_chord(root_pc, quality)
+            return self._absolute_chord(root_pc, target_quality)
 
         tonic_pc, mode = self._parse_key(key)
         degree = (root_pc - tonic_pc) % 12
 
-        numeral = self._degree_to_roman(degree, mode, quality)
-        if quality in ("7", "maj7", "m7"):
-            suffix = "7" if quality == "7" else ("maj7" if quality == "maj7" else "7")
-            numeral = numeral + suffix
-        elif quality == "dim":
-            numeral = numeral + "o"
-        elif quality.startswith("sus"):
-            numeral = numeral + quality
+        # 2. Get Base Roman (I, bII, etc.) with Casing
+        numeral = self._degree_to_roman(degree, target_quality)
+        
+        # 3. Apply Suffixes for Allowed Extensions
+        if target_quality == "maj7":
+            numeral += "maj7"
+        elif target_quality == "7":
+            numeral += "7"
+        elif target_quality == "m7":
+            numeral += "7"      # i + 7 = i7
+        elif target_quality == "sus4":
+            numeral += "sus4"
+        elif target_quality == "dim7":
+            numeral += "o7"     # viio7
+        elif target_quality == "m7b5":
+            numeral += "h7"     # iih7 (or iø7)
 
         return numeral
+
+    def _degree_to_roman(self, degree: int, quality: str) -> str:
+        # Fixed Chromatic Mapping (0-11)
+        base_degrees = {
+            0: "I",
+            1: "bII",
+            2: "II",
+            3: "bIII",
+            4: "III",
+            5: "IV",
+            6: "bV",
+            7: "V",
+            8: "bVI",
+            9: "VI",
+            10: "bVII",
+            11: "VII",
+        }
+        
+        roman = base_degrees.get(degree % 12, "?")
+
+        # Casing Rule: Minor/Diminished families -> Lowercase
+        if quality in ["min", "dim", "dim7", "m7", "m7b5"]:
+            roman = roman.lower()
+            
+        return roman
 
     def _absolute_chord(self, root_pc: int, quality: str) -> str:
         names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         name = names[root_pc % 12]
-        suffix = ""
-        if quality == "min":
-            suffix = "m"
-        elif quality == "dim":
-            suffix = "dim"
-        elif quality == "7":
-            suffix = "7"
-        elif quality == "maj7":
-            suffix = "maj7"
-        elif quality == "m7":
-            suffix = "m7"
-        elif quality.startswith("sus"):
-            suffix = quality
+        
+        suffix_map = {
+            "maj": "", "min": "m", 
+            "maj7": "maj7", "7": "7", "m7": "m7",
+            "sus4": "sus4", 
+            "dim7": "dim7", "m7b5": "m7b5"
+        }
+        suffix = suffix_map.get(quality, "")
         return name + suffix
 
     def _parse_key(self, key: str) -> Tuple[int, str]:
         tonic, mode = key.split("_")
         names = {
-            "C": 0,
-            "C#": 1,
-            "DB": 1,
-            "D": 2,
-            "D#": 3,
-            "EB": 3,
-            "E": 4,
-            "F": 5,
-            "F#": 6,
-            "GB": 6,
-            "G": 7,
-            "G#": 8,
-            "AB": 8,
-            "A": 9,
-            "A#": 10,
-            "BB": 10,
-            "B": 11,
+            "C": 0, "C#": 1, "DB": 1, "D": 2, "D#": 3, "EB": 3,
+            "E": 4, "F": 5, "F#": 6, "GB": 6, "G": 7, "G#": 8,
+            "AB": 8, "A": 9, "A#": 10, "BB": 10, "B": 11,
         }
         return names.get(tonic.upper(), 0), mode.upper()
-
-    def _degree_to_roman(self, degree: int, mode: str, quality: str) -> str:
-        base_major = {
-            0: "I",
-            2: "II",
-            4: "III",
-            5: "IV",
-            7: "V",
-            9: "VI",
-            11: "VII",
-        }
-        if degree not in base_major:
-            return "N.C."
-        base = base_major[degree]
-        if mode == "MINOR":
-            diatonic_minor = {0: "i", 2: "ii", 3: "iii", 5: "iv", 7: "v", 8: "VI", 10: "VII"}
-            if degree in diatonic_minor:
-                base = diatonic_minor[degree]
-        if quality == "min" and base.isupper():
-            base = base.lower()
-        return base
-
-    # ---- Helpers ----
-    def _fill_bar(self, chord: str, slots: int) -> List[str]:
-        slots = max(1, slots)
-        return [chord] + ["-"] * (slots - 1)
-
-    def _key_from_bars(self, bars: List[Dict], global_key: Optional[str]) -> Optional[str]:
-        # Deprecated: key is decided upstream (KeyDetector). Kept for compatibility.
-        return global_key

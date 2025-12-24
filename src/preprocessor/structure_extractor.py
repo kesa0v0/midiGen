@@ -17,7 +17,7 @@ class StructureExtractor:
 
     def __init__(
         self,
-        min_section_bars: int = 4,
+        min_section_bars: int = 8,
         density_jump: float = 0.6,
         velocity_jump: float = 20.0,
         centroid_jump: float = 5.0,
@@ -91,6 +91,7 @@ class StructureExtractor:
         spans = []
         for idx in range(len(filtered) - 1):
             spans.append((filtered[idx], filtered[idx + 1]))
+        spans = self._merge_similar_spans(spans, bars)
 
         labels = self._label_sections(bars, spans)
 
@@ -226,3 +227,47 @@ class StructureExtractor:
         if not ts:
             return None
         return TimeSignature(ts[0], ts[1])
+
+    def _merge_similar_spans(self, spans: List[tuple], bars: List[Dict]) -> List[tuple]:
+        """
+        Merge adjacent spans if their stats/time/key are similar to avoid over-splitting.
+        """
+        if not spans:
+            return []
+
+        def span_stats(start, end):
+            slice_bars = bars[start:end]
+            dens = np.mean([b.get("note_count", 0) for b in slice_bars]) if slice_bars else 0
+            vel_vals = [b.get("mean_velocity") for b in slice_bars if b.get("mean_velocity") is not None]
+            vel = np.mean(vel_vals) if vel_vals else 0
+            key = self._section_key_candidate(slice_bars)
+            ts = self._consistent_time_sig(slice_bars)
+            bpm = self._consistent_bpm(slice_bars)
+            return dens, vel, key, ts, bpm
+
+        merged = [spans[0]]
+        prev_stats = span_stats(*spans[0])
+
+        for sp in spans[1:]:
+            cur_stats = span_stats(*sp)
+            if self._similar_sections(prev_stats, cur_stats):
+                # merge into previous
+                start = merged[-1][0]
+                merged[-1] = (start, sp[1])
+                prev_stats = span_stats(start, sp[1])
+            else:
+                merged.append(sp)
+                prev_stats = cur_stats
+
+        return merged
+
+    def _similar_sections(self, s1, s2) -> bool:
+        dens1, vel1, key1, ts1, bpm1 = s1
+        dens2, vel2, key2, ts2, bpm2 = s2
+
+        dens_close = abs(dens1 - dens2) <= 2.0
+        vel_close = abs(vel1 - vel2) <= 15.0
+        key_ok = (key1 is None or key1 == "UNKNOWN" or key2 is None or key2 == "UNKNOWN" or key1 == key2)
+        ts_ok = (ts1 is None or ts2 is None or (ts1.numerator == ts2.numerator and ts1.denominator == ts2.denominator))
+        bpm_ok = (bpm1 is None or bpm2 is None or abs(bpm1 - bpm2) <= 5)
+        return dens_close and vel_close and key_ok and ts_ok and bpm_ok

@@ -20,7 +20,8 @@ class ConductorTokenGenerator:
         """
         global_bpm, global_ts = self._global_defaults(analysis)
         global_key = analysis.get("global_key", None)
-        grid_unit = self._grid_unit(analysis, global_ts)
+        # grid_unit을 무조건 1/4로 고정 (분석 결과 무시)
+        grid_unit = "1/4"
         midi_type = analysis.get("midi_type")
         ticks_per_beat = analysis.get("ticks_per_beat")
         channel_programs = analysis.get("channel_programs")
@@ -96,18 +97,39 @@ class ConductorTokenGenerator:
         return max(1, slots)
 
     def _apply_hooks(self, conductor_sections, sections, analysis, form):
-        base_counts = {}
-        for sec in sections:
-            base = self._base_label(sec.id)
-            base_counts[base] = base_counts.get(base, 0) + 1
-
-        bars = analysis.get("bars", [])
+        # HOOK/REPEAT 판정 개선: CHORUS는 무조건 HOOK, 반복 코드 진행은 IDENTICAL
+        prog_hashes = {}
         for idx, (csec, sec) in enumerate(zip(conductor_sections, sections)):
-            bar_slice = bars[sec.start_bar : sec.end_bar] if bars else []
-            hook_yes = self._hook_presence(idx, sections, bar_slice, base_counts)
-            csec.hook = "YES" if hook_yes else "NO"
-            csec.hook_repeat = self._hook_repeat(csec, conductor_sections, base_counts)
-            csec.hook_role = "MELODY" if hook_yes else "MOTIF"
+            sec_id_upper = sec.id.upper()
+            is_chorus = "CHORUS" in sec_id_upper
+            # prog_grid를 해시로 변환 (tuple로 변환 후 hash)
+            prog_tuple = tuple(tuple(row) for row in csec.prog_grid)
+            repeat_type = "VARIATION"
+            hook = "NO"
+            # 반복 탐색: 동일 base_id의 이전 섹션과 코드 진행이 완전히 같으면 IDENTICAL
+            base_id = sec.id.split('_')[0]
+            found_identical = False
+            is_first_occurrence = True
+            for prev_idx in range(idx):
+                prev_sec = sections[prev_idx]
+                prev_base_id = prev_sec.id.split('_')[0]
+                if base_id == prev_base_id:
+                    is_first_occurrence = False
+                    prev_prog_tuple = tuple(tuple(row) for row in conductor_sections[prev_idx].prog_grid)
+                    if prog_tuple == prev_prog_tuple:
+                        repeat_type = "IDENTICAL"
+                        found_identical = True
+                        break
+            # 첫 등장이어도 외부로는 VARIATION만 노출
+            # 내부적으로 is_first_occurrence로 필요시 추가 처리 가능
+            # HOOK 판정: CHORUS는 무조건 YES, 반복(IDENTICAL)이면 YES
+            if is_chorus or repeat_type == "IDENTICAL":
+                hook = "YES"
+            else:
+                hook = "NO"
+            csec.hook = hook
+            csec.hook_repeat = repeat_type
+            csec.hook_role = "MELODY" if hook == "YES" else "MOTIF"
             csec.hook_range = self._hook_range(csec)
             csec.hook_rhythm = self._hook_rhythm(csec)
 
@@ -153,19 +175,9 @@ class ConductorTokenGenerator:
         unique = len(set(int(c // 1) for c in cents))
         return unique <= len(cents) * 0.6
 
-    def _hook_repeat(self, csec, all_secs, base_counts) -> str:
-        base = self._base_label(csec.name)
-        if base_counts.get(base, 0) <= 1:
-            return "VARIATION"
-        # compare to first occurrence
-        first = None
-        for other in all_secs:
-            if self._base_label(other.name) == base:
-                first = other
-                break
-        if first and first is not csec and first.prog_grid == csec.prog_grid:
-            return "IDENTICAL"
-        return "VARIATION"
+    # _hook_repeat는 더 이상 사용하지 않음 (로직 통합)
+    # def _hook_repeat(self, csec, all_secs, base_counts) -> str:
+    #     pass
 
     def _hook_range(self, csec) -> str:
         spacing = csec.control_tokens.get("SPACING")
