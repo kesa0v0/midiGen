@@ -16,6 +16,7 @@ class Section:
     local_bpm: Optional[int] = None
     local_time_sig: Optional[TimeSignature] = None
     local_key: Optional[str] = None
+    role: Optional[str] = None
 
 
 @dataclass

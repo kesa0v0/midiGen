@@ -97,50 +97,63 @@ class ConductorTokenGenerator:
         return max(1, slots)
 
     def _apply_hooks(self, conductor_sections, sections, analysis, form):
-        # HOOK/REPEAT 판정 개선: CHORUS는 무조건 HOOK, 반복 코드 진행은 IDENTICAL
+        # HOOK/REPEAT 판정 개선: MAIN_THEME는 무조건 HOOK, 반복 코드 진행은 IDENTICAL
         prog_hashes = {}
         for idx, (csec, sec) in enumerate(zip(conductor_sections, sections)):
-            sec_id_upper = sec.id.upper()
-            is_chorus = "CHORUS" in sec_id_upper
+            # Use role metadata instead of ID string
+            is_main_theme = (sec.role == "MAIN_THEME")
+            
             # prog_grid를 해시로 변환 (tuple로 변환 후 hash)
             prog_tuple = tuple(tuple(row) for row in csec.prog_grid)
-            # CHORUS는 기본적으로 IDENTICAL, 반복 출현이 있을 때만 VARIATION 허용
-            if is_chorus:
+            
+            # MAIN_THEME는 기본적으로 IDENTICAL (Chorus logic replacement)
+            if is_main_theme:
                 repeat_type = "IDENTICAL"
             else:
                 repeat_type = "VARIATION"
+            
             hook = "NO"
-            # 반복 탐색: 동일 base_id의 이전 섹션과 코드 진행이 완전히 같으면 IDENTICAL
-            base_id = sec.id.split('_')[0]
+            # 반복 탐색: 동일 ID의 이전 섹션과 코드 진행이 완전히 같으면 IDENTICAL
+            base_id = sec.id # No longer need split('_') as IDs are SECTION_A etc without numeric suffixes in new logic? 
+            # Actually structure_extractor labels are just SECTION_A, SECTION_B (unique types).
+            # But duplicate appearances get the SAME ID. 
+            # structure_extractor labels: returns just "SECTION_A" etc.
+            # So if type repeats, ID is same.
+            
             found_identical = False
             is_first_occurrence = True
+            
             for prev_idx in range(idx):
                 prev_sec = sections[prev_idx]
-                prev_base_id = prev_sec.id.split('_')[0]
-                if base_id == prev_base_id:
+                if sec.id == prev_sec.id:
                     is_first_occurrence = False
                     prev_prog_tuple = tuple(tuple(row) for row in conductor_sections[prev_idx].prog_grid)
                     if prog_tuple == prev_prog_tuple:
                         repeat_type = "IDENTICAL"
                         found_identical = True
                         break
-                    # CHORUS 반복 출현이지만 코드가 다르면 VARIATION
-                    if is_chorus:
+                    # MAIN_THEME 반복 출현이지만 코드가 다르면 VARIATION
+                    if is_main_theme:
                         repeat_type = "VARIATION"
-            # HOOK 판정: CHORUS는 무조건 YES, 반복(IDENTICAL)이면 YES
-            if is_chorus or repeat_type == "IDENTICAL":
+            
+            # HOOK 판정: MAIN_THEME는 무조건 YES, 반복(IDENTICAL)이면 YES
+            if is_main_theme or repeat_type == "IDENTICAL":
                 hook = "YES"
             else:
                 hook = "NO"
+            
             csec.hook = hook
             csec.hook_repeat = repeat_type
-            # HOOK=NO일 때 HOOK_ROLE=MOTIF는 INTRO/BRIDGE만, 그 외는 None(생략)
+            
+            # HOOK_ROLE 설정
             if hook == "YES":
                 csec.hook_role = "MELODY"
-            elif base_id in ["INTRO", "BRIDGE"]:
+            elif idx == 0: 
+                # First section often acts as Intro/Motif
                 csec.hook_role = "MOTIF"
             else:
                 csec.hook_role = None
+            
             csec.hook_range = self._hook_range(csec)
             csec.hook_rhythm = self._hook_rhythm(csec)
 

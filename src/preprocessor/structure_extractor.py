@@ -37,7 +37,7 @@ class StructureExtractor:
         if not bars:
             return [
                 Section(
-                    id="A",
+                    id="SECTION_A",
                     start_bar=0,
                     end_bar=0,
                 )
@@ -93,12 +93,14 @@ class StructureExtractor:
             spans.append((filtered[idx], filtered[idx + 1]))
         spans = self._merge_similar_spans(spans, bars)
 
-        labels = self._label_sections(bars, spans)
+        labeled_info = self._label_sections(bars, spans)
 
         sections: List[Section] = []
         for idx, (start, end) in enumerate(spans):
             if start >= end:
                 continue
+            
+            label, role = labeled_info[idx]
 
             first_bar = bars[start]
             local_ts = self._consistent_time_sig(bars[start:end])
@@ -107,12 +109,13 @@ class StructureExtractor:
 
             sections.append(
                 Section(
-                    id=labels[idx],
+                    id=label,
                     start_bar=start,
                     end_bar=end,
                     local_bpm=local_bpm,
                     local_time_sig=local_ts,
                     local_key=local_key,
+                    role=role
                 )
             )
 
@@ -166,44 +169,100 @@ class StructureExtractor:
         most = Counter(keys).most_common(1)[0][0]
         return most
 
-    def _label_sections(self, bars: List[Dict], spans: List[tuple]) -> List[str]:
+    def _label_sections(self, bars: List[Dict], spans: List[tuple]) -> List[Tuple[str, Optional[str]]]:
         """
-        Heuristic labels: INTRO, VERSE, CHORUS, BRIDGE, OUTRO with numeric suffix if repeated.
+        Abstract labeling: SECTION_A, SECTION_B, ...
+        Groups similar sections together.
+        Determines 'MAIN_THEME' based on energy and repetition.
         """
         if not spans:
             return []
 
-        densities = []
-        velocities = []
+        # 1. Compute stats for each span
+        span_stats = []
         for start, end in spans:
             seg = bars[start:end]
             dens = [b.get("note_count", 0) for b in seg]
             vels = [b.get("mean_velocity") for b in seg if b.get("mean_velocity") is not None]
-            densities.append(float(sum(dens)) / max(1, len(dens)))
-            velocities.append(float(sum(vels)) / max(1, len(vels)) if vels else 0.0)
+            
+            avg_dens = float(sum(dens)) / max(1, len(dens))
+            avg_vel = float(sum(vels)) / max(1, len(vels)) if vels else 0.0
+            energy = avg_dens + avg_vel * 0.1
+            
+            span_stats.append({
+                "avg_dens": avg_dens,
+                "avg_vel": avg_vel,
+                "energy": energy,
+                "start": start,
+                "end": end
+            })
 
-        scores = [d + v * 0.1 for d, v in zip(densities, velocities)]
-        max_idx = int(np.argmax(scores)) if scores else 0
-        min_idx = int(np.argmin(scores)) if scores else 0
+        # 2. Cluster sections (Types)
+        # types: list of {"stats": stats, "label": "SECTION_X"}
+        types = []
+        labels = [] # Index in 'types' for each span
 
-        labels = []
-        counts = {"INTRO": 0, "VERSE": 0, "CHORUS": 0, "BRIDGE": 0, "OUTRO": 0}
-        for i, (start, end) in enumerate(spans):
-            bars_len = end - start
-            if i == 0:
-                label = "INTRO"
-            elif i == len(spans) - 1:
-                label = "OUTRO"
-            elif i == max_idx:
-                label = "CHORUS"
-            elif i == min_idx and bars_len >= 4:
-                label = "BRIDGE"
+        for i, stats in enumerate(span_stats):
+            match_idx = -1
+            # Check similarity with existing types
+            for t_idx, t_data in enumerate(types):
+                ref = t_data["stats"]
+                # Use strict thresholds similar to _similar_sections but perhaps slightly looser for global matching?
+                # Using the same logic as _similar_sections for consistency
+                dens_close = abs(stats["avg_dens"] - ref["avg_dens"]) <= 2.5 # slightly looser than 2.0
+                vel_close = abs(stats["avg_vel"] - ref["avg_vel"]) <= 20.0   # slightly looser than 15.0
+                
+                # Note: Key/TimeSig are not checked here, purely based on energy/density for structural type
+                if dens_close and vel_close:
+                    match_idx = t_idx
+                    break
+            
+            if match_idx != -1:
+                labels.append(match_idx)
+                types[match_idx]["count"] += 1
+                # Update stats average? (Optional, skipping for stability)
             else:
-                label = "VERSE"
-            counts[label] += 1
-            suffix = f"_{counts[label]}" if counts[label] > 1 else ""
-            labels.append(label + suffix)
-        return labels
+                # Create new type
+                new_label_char = chr(ord('A') + len(types))
+                # Fallback if we run out of letters (unlikely for typical song)
+                if len(types) >= 26:
+                    new_label_char = f"Z{len(types)}"
+                
+                types.append({
+                    "stats": stats,
+                    "label": f"SECTION_{new_label_char}",
+                    "count": 1,
+                    "id": len(types)
+                })
+                labels.append(len(types) - 1)
+
+        # 3. Identify MAIN_THEME
+        # Criteria: Repeated (count > 1) AND Highest Energy among repeated sections
+        max_energy = -1.0
+        main_theme_idx = -1
+
+        for i, t_data in enumerate(types):
+            if t_data["count"] > 1:
+                if t_data["stats"]["energy"] > max_energy:
+                    max_energy = t_data["stats"]["energy"]
+                    main_theme_idx = i
+        
+        # If no section repeats, maybe pick the highest energy one anyway? 
+        # Or strictly follow "repeats" rule. Pop songs usually have repeating Chorus.
+        # If nothing repeats, we might be in a linear progression. No Main Theme?
+        # Let's enforce repetition for MAIN_THEME to be safe.
+
+        # 4. Generate Output (Label, Role)
+        result = []
+        for idx in labels:
+            label_str = types[idx]["label"]
+            role = None
+            if idx == main_theme_idx:
+                role = "MAIN_THEME"
+            result.append((label_str, role))
+
+        return result
+
 
     def _consistent_time_sig(self, bars: List[Dict]) -> Optional[TimeSignature]:
         if not bars:

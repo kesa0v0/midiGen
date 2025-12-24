@@ -6,7 +6,11 @@ class DatasetExporter:
     Deterministic text export for conductor tokens.
     """
 
-    ROLE_ORDER = ["MELODY", "HARMONY", "BASS", "DRUMS"]
+    ROLE_ORDER = [
+        "INSTRUMENT", 
+        "MELODY", "HARMONY", "BASS", "DRUMS", 
+        "STRINGS", "BRASS", "WOODWINDS", "PERCUSSION"
+    ]
     CTRL_ORDER = ["DYN", "DEN", "MOV", "FILL", "FEEL", "LEAP", "SPACING", "ENERGY"]
 
     def export(
@@ -34,8 +38,18 @@ class DatasetExporter:
         # [INSTRUMENTS]
         lines.append("[INSTRUMENTS]")
         for role in self.ROLE_ORDER:
-            val = instruments.get(role, "UNKNOWN")
-            lines.append(f"{role}={val}")
+            if role in instruments:
+                val = instruments[role]
+                if val != "NONE":
+                    lines.append(f"{role}={val}")
+        
+        # Fallback: Print any other keys in instruments not in ROLE_ORDER (sorted)
+        for key in sorted(instruments.keys()):
+            if key not in self.ROLE_ORDER:
+                val = instruments[key]
+                if val != "NONE":
+                    lines.append(f"{key}={val}")
+                    
         lines.append("")  # blank line
 
         # [FORM]
