@@ -11,7 +11,15 @@ from validator import PostValidator, PreValidator
 
 
 class DatasetBuilder:
-    def build(self, midi_path: str, output_path: str):
+    def build(
+        self, 
+        midi_path: str, 
+        output_path: str,
+        genre: str = "UNKNOWN",
+        style: str = "UNKNOWN",
+        artist: str = "UNKNOWN",
+        inst_type: str = "UNKNOWN"
+    ):
         midi_data = MidiLoader().load(midi_path)
         if midi_data is None:
             return
@@ -37,7 +45,7 @@ class DatasetBuilder:
             key_val = key_result.section_keys.get(sec.id)
             sec.local_key = None if key_val in (None, "KEEP") else key_val
 
-        instruments = InstrumentRoleAssigner().assign(midi)
+        instruments = InstrumentRoleAssigner().assign(midi, inst_type=inst_type)
 
         prog_extractor = ChordProgressionExtractor()
         ctrl_extractor = ControlTokenExtractor()
@@ -55,4 +63,8 @@ class DatasetBuilder:
             instruments,
             output_path,
             midi_path,
+            genre=genre,
+            style=style,
+            artist=artist,
+            inst_type=inst_type
         )

@@ -27,7 +27,7 @@ class InstrumentRoleAssigner:
     Heuristic (non-ML) role assignment with predictable fallbacks.
     """
 
-    def assign(self, midi: pretty_midi.PrettyMIDI) -> Dict[str, str]:
+    def assign(self, midi: pretty_midi.PrettyMIDI, inst_type: str = "BAND") -> Dict[str, str]:
         tracks = self._collect_tracks(midi)
         if not tracks:
             return {
@@ -37,29 +37,41 @@ class InstrumentRoleAssigner:
                 "DRUMS": "UNKNOWN",
             }
 
-        # Dynamic Strategy Selection
+        # Handle explicit types from metadata
+        if inst_type == "PIANO_SOLO":
+            # Force no drums, treat as band without drums
+            # This relies on pickers ignoring tracks with is_drum=True, 
+            # effectively muting any accidental drum tracks in a piano solo file.
+            return self._assign_band(tracks, forced_drums=None)
+        
+        elif inst_type == "ORCHESTRA":
+            return self._assign_orchestral(tracks)
+        
+        elif inst_type == "BAND":
+             return self._assign_band(tracks)
+
+        # Fallback / Legacy Dynamic Strategy Selection
         non_drum_tracks = [t for t in tracks if not t.instrument.is_drum]
         has_drums = any(t.instrument.is_drum for t in tracks)
 
         # 1. Solo Instrument
         if len(non_drum_tracks) == 1:
-            # If there are drums in a solo context (e.g. Piano + Drums), it's a duo, arguably "Band" logic is better?
-            # User said: "Piano solo: No Drums, Bass tracks".
-            # So if no drums and 1 track -> Solo.
             if not has_drums:
                 return {"INSTRUMENT": self._instrument_name(non_drum_tracks[0])}
         
         # 2. Orchestra (Large Ensemble without Drum Kit)
-        # Heuristic: No standard drum kit, high track count, or mostly orchestral instruments.
-        # Simple threshold: No drums and >= 6 tracks.
         if not has_drums and len(non_drum_tracks) >= 6:
              return self._assign_orchestral(tracks)
 
         # 3. Pop/Band (Default)
         return self._assign_band(tracks)
 
-    def _assign_band(self, tracks: List[TrackStats]) -> Dict[str, str]:
-        drums = self._detect_drums(tracks)
+    def _assign_band(self, tracks: List[TrackStats], forced_drums: Optional[str] = "DETECT") -> Dict[str, str]:
+        if forced_drums == "DETECT":
+            drums = self._detect_drums(tracks)
+        else:
+            drums = forced_drums
+
         melody = self._pick_melody(tracks, drums)
         bass = self._pick_bass(tracks, drums)
         harmony = self._pick_harmony(tracks, drums, melody, bass)

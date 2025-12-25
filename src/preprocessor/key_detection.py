@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 
@@ -52,6 +53,10 @@ class KeyDetector:
         bar index는 0-based, end_bar는 exclusive로 가정.
         """
         score = converter.parse(midi_path)
+        
+        # [Bass-Weighted Detection]
+        # "민주주의의 함정" 해결: 베이스 파트의 비중을 높여 화성학적 뿌리를 강조
+        score = self._apply_bass_weights(score, weight=5)
 
         global_key = self._detect_global_key(score)
         global_key_str = KeyStringNormalizer.normalize(global_key)
@@ -75,6 +80,67 @@ class KeyDetector:
             section_key_map[sec_id] = "KEEP" if cand_str == global_key_str else cand_str
 
         return KeyResult(global_key=global_key_str, section_keys=section_key_map)
+
+    def _apply_bass_weights(self, score: stream.Score, weight: int = 5) -> stream.Score:
+        """
+        Identify bass parts and duplicate them to increase their influence on key detection.
+        Combats the issue where high-frequency melody notes overwhelm the bass root.
+        """
+        bass_parts = []
+        for p in score.parts:
+            if self._is_bass_part(p):
+                bass_parts.append(p)
+        
+        if not bass_parts:
+            return score
+            
+        # Add (weight - 1) copies
+        for bp in bass_parts:
+            for _ in range(weight - 1):
+                new_part = copy.deepcopy(bp)
+                score.insert(0, new_part)
+        
+        return score
+
+    def _is_bass_part(self, part: stream.Part) -> bool:
+        # 1. Check Instrument Name / Program
+        try:
+            inst = part.getInstrument()
+            if inst:
+                # Check name
+                inst_name = inst.bestName()
+                if inst_name and "bass" in inst_name.lower():
+                    return True
+                # Check MIDI Program (32-39: Bass, 87: Bass & Lead)
+                if inst.midiProgram is not None:
+                    if 32 <= inst.midiProgram <= 39:
+                        return True
+        except Exception:
+            pass
+            
+        # 2. Check Part Name
+        if part.partName and "bass" in part.partName.lower():
+            return True
+            
+        # 3. Check Average Pitch (Fallback)
+        pitches = []
+        try:
+            # Flatten to find all notes
+            for n in part.flatten().notes:
+                if n.isNote:
+                    pitches.append(n.pitch.midi)
+                elif n.isChord:
+                    for p in n.pitches:
+                        pitches.append(p.midi)
+        except Exception:
+            pass
+            
+        if pitches:
+            avg_pitch = sum(pitches) / len(pitches)
+            if avg_pitch <= 48: # C3 (MIDI 48) or lower
+                return True
+                
+        return False
 
     def _detect_global_key(self, score: stream.Score) -> Optional[m21key.Key]:
         # 1) music21 basic analysis

@@ -18,7 +18,11 @@ class DatasetExporter:
         conductor_bundle,
         instruments,
         output_path,
-        midi_path: str = ""
+        midi_path: str = "",
+        genre: str = "UNKNOWN",
+        style: str = "UNKNOWN",
+        artist: str = "UNKNOWN",
+        inst_type: str = "UNKNOWN"
     ):
         global_meta = conductor_bundle["global"]
         form = conductor_bundle["form"]
@@ -33,6 +37,10 @@ class DatasetExporter:
         lines.append(f"GRID_UNIT={global_meta['grid_unit']}")
         if global_meta.get("key"):
             lines.append(f"KEY={global_meta['key']}")
+        lines.append(f"GENRE={genre}")
+        lines.append(f"STYLE={style}")
+        lines.append(f"ARTIST={artist}")
+        lines.append(f"INST_TYPE={inst_type}")
         lines.append("")  # blank line
 
         # [INSTRUMENTS]
