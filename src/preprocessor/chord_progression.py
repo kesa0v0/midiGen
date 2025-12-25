@@ -181,6 +181,7 @@ class ChordProgressionExtractor:
         end: float,
         min_notes: int = 1,
         bass_track_ids: Optional[Set[int]] = None,
+        key: Optional[str] = None,
     ) -> Optional[ChordCandidate]:
         hist = np.zeros(12, dtype=float)
         note_count = 0
@@ -222,6 +223,17 @@ class ChordProgressionExtractor:
         if not bass_role_active and min_pitch < 128 and self.min_pitch_boost > 0:
             hist[min_pitch % 12] += bass_weight * self.min_pitch_boost
 
+        # Pre-compute diatonic set if key is available
+        diatonic_pc = set()
+        if key and key != "UNKNOWN":
+            tonic_pc, mode = self._parse_key(key)
+            # Major Scale Intervals
+            intervals = {0, 2, 4, 5, 7, 9, 11}
+            if mode == "MINOR":
+                # Natural Minor + Raised 7th (Harmonic) + Raised 6th (Melodic)
+                intervals = {0, 2, 3, 5, 7, 8, 9, 10, 11}
+            diatonic_pc = {(tonic_pc + i) % 12 for i in intervals}
+
         best: Optional[ChordCandidate] = None
         best_simple: Optional[ChordCandidate] = None
         for root in range(12):
@@ -230,6 +242,15 @@ class ChordProgressionExtractor:
                 for interval, weight in intervals.items():
                     tpl[(root + interval) % 12] = weight
                 score = self._cosine_similarity(hist, tpl)
+                
+                # Diatonic Bonus / Non-Diatonic Penalty
+                if diatonic_pc:
+                    # Check if root is diatonic
+                    if root in diatonic_pc:
+                        score += self.diatonic_bonus
+                    else:
+                        score -= self.nondiatonic_penalty
+
                 # Minimal triad bias; sus handled via penalties below.
                 if quality in ["maj", "min"]:
                     score += 0.02
