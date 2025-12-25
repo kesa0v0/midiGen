@@ -43,6 +43,9 @@ class ChordProgressionExtractor:
         sus_tiebreak_margin: float = 0.1,
         diatonic_bonus: float = 0.12,
         nondiatonic_penalty: float = 0.08,
+        melody_penalty: float = 0.2,
+        harmony_boost: float = 3.0,
+        bass_root_bonus: float = 0.1,
     ):
         self.grid_unit = grid_unit
         self.min_notes = min_notes
@@ -54,6 +57,9 @@ class ChordProgressionExtractor:
         self.sus_tiebreak_margin = max(0.0, float(sus_tiebreak_margin))
         self.diatonic_bonus = max(0.0, float(diatonic_bonus))
         self.nondiatonic_penalty = max(0.0, float(nondiatonic_penalty))
+        self.melody_penalty = melody_penalty
+        self.harmony_boost = harmony_boost
+        self.bass_root_bonus = bass_root_bonus
 
         # 1. Detection Templates (Weighted intervals for accuracy)
         self.templates = {
@@ -116,6 +122,8 @@ class ChordProgressionExtractor:
 
         role_tracks = analysis.get("role_tracks") or {}
         bass_track_ids = set(role_tracks.get("BASS") or [])
+        melody_track_ids = set(role_tracks.get("MELODY") or [])
+        harmony_track_ids = set(role_tracks.get("HARMONY") or [])
 
         for bar in section_bars:
             bar_tokens: List[str] = []
@@ -139,6 +147,8 @@ class ChordProgressionExtractor:
                     e_time,
                     min_notes=self.min_notes,
                     bass_track_ids=bass_track_ids,
+                    melody_track_ids=melody_track_ids,
+                    harmony_track_ids=harmony_track_ids,
                     key=roman_key,
                 )
                 
@@ -181,48 +191,48 @@ class ChordProgressionExtractor:
         end: float,
         min_notes: int = 1,
         bass_track_ids: Optional[Set[int]] = None,
+        melody_track_ids: Optional[Set[int]] = None,
+        harmony_track_ids: Optional[Set[int]] = None,
         key: Optional[str] = None,
     ) -> Optional[ChordCandidate]:
         hist = np.zeros(12, dtype=float)
         note_count = 0
         
-        min_pitch = 128
-        bass_weight = 0.0
-        bass_role_active = False
-
+        # Track lowest pitch as a fallback/bonus
+        lowest_pitch_class = -1
+        global_min_pitch = 128
+        
         for inst_idx, inst in enumerate(midi.instruments):
             if inst.is_drum:
                 continue
-            is_bass_role = bool(bass_track_ids) and inst_idx in bass_track_ids
+            
+            weight_multiplier = 1.0
+            if bass_track_ids and inst_idx in bass_track_ids:
+                weight_multiplier = self.bass_role_weight
+            elif melody_track_ids and inst_idx in melody_track_ids:
+                weight_multiplier = self.melody_penalty
+            elif harmony_track_ids and inst_idx in harmony_track_ids:
+                weight_multiplier = self.harmony_boost
+
             for note in inst.notes:
                 if note.start >= end or note.end <= start:
                     continue
                 overlap = min(note.end, end) - max(note.start, start)
                 if overlap <= 0:
                     continue
-                weight = note.velocity * overlap
+                weight = note.velocity * overlap * weight_multiplier
                 pitch_class = note.pitch % 12
                 hist[pitch_class] += weight
-                if is_bass_role:
-                    hist[pitch_class] += weight * (self.bass_role_weight - 1.0)
-                    bass_role_active = True
                 note_count += 1
                 
-                # Track lowest pitch as a fallback when no bass-role notes are active.
-                if note.pitch < min_pitch:
-                    min_pitch = note.pitch
-                    bass_weight = weight
-                elif note.pitch == min_pitch:
-                    # If multiple notes have the same lowest pitch, take the max weight
-                    bass_weight = max(bass_weight, weight)
+                # Update global lowest pitch
+                if note.pitch < global_min_pitch:
+                    global_min_pitch = note.pitch
+                    lowest_pitch_class = pitch_class
 
         if hist.sum() == 0 or note_count < min_notes:
             return None
             
-        # Apply lowest-pitch boost only when no bass-role notes are active in the window.
-        if not bass_role_active and min_pitch < 128 and self.min_pitch_boost > 0:
-            hist[min_pitch % 12] += bass_weight * self.min_pitch_boost
-
         # Pre-compute diatonic set if key is available
         diatonic_pc = set()
         if key and key != "UNKNOWN":
@@ -250,6 +260,10 @@ class ChordProgressionExtractor:
                         score += self.diatonic_bonus
                     else:
                         score -= self.nondiatonic_penalty
+
+                # Bass Root Bonus
+                if lowest_pitch_class != -1 and root == lowest_pitch_class:
+                    score += self.bass_root_bonus
 
                 # Minimal triad bias; sus handled via penalties below.
                 if quality in ["maj", "min"]:
