@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pretty_midi
@@ -28,27 +28,36 @@ class InstrumentRoleAssigner:
     """
 
     def assign(self, midi: pretty_midi.PrettyMIDI, inst_type: str = "BAND") -> Dict[str, str]:
+        roles, _ = self.assign_with_tracks(midi, inst_type=inst_type)
+        return roles
+
+    def assign_with_tracks(
+        self, midi: pretty_midi.PrettyMIDI, inst_type: str = "BAND"
+    ) -> Tuple[Dict[str, str], Dict[str, List[int]]]:
         tracks = self._collect_tracks(midi)
         if not tracks:
-            return {
-                "MELODY": "UNKNOWN",
-                "HARMONY": "UNKNOWN",
-                "BASS": "UNKNOWN",
-                "DRUMS": "UNKNOWN",
-            }
+            return (
+                {
+                    "MELODY": "UNKNOWN",
+                    "HARMONY": "UNKNOWN",
+                    "BASS": "UNKNOWN",
+                    "DRUMS": "UNKNOWN",
+                },
+                {},
+            )
 
         # Handle explicit types from metadata
         if inst_type == "PIANO_SOLO":
             # Force no drums, treat as band without drums
             # This relies on pickers ignoring tracks with is_drum=True, 
             # effectively muting any accidental drum tracks in a piano solo file.
-            return self._assign_band(tracks, forced_drums=None)
-        
-        elif inst_type == "ORCHESTRA":
-            return self._assign_orchestral(tracks)
-        
-        elif inst_type == "BAND":
-             return self._assign_band(tracks)
+            return self._assign_band_with_tracks(tracks, forced_drums=None)
+
+        if inst_type == "ORCHESTRA":
+            return self._assign_orchestral(tracks), {}
+
+        if inst_type == "BAND":
+            return self._assign_band_with_tracks(tracks)
 
         # Fallback / Legacy Dynamic Strategy Selection
         non_drum_tracks = [t for t in tracks if not t.instrument.is_drum]
@@ -57,31 +66,47 @@ class InstrumentRoleAssigner:
         # 1. Solo Instrument
         if len(non_drum_tracks) == 1:
             if not has_drums:
-                return {"INSTRUMENT": self._instrument_name(non_drum_tracks[0])}
-        
+                solo = non_drum_tracks[0]
+                return {"INSTRUMENT": self._instrument_name(solo)}, {"INSTRUMENT": [solo.idx]}
+
         # 2. Orchestra (Large Ensemble without Drum Kit)
         if not has_drums and len(non_drum_tracks) >= 6:
-             return self._assign_orchestral(tracks)
+            return self._assign_orchestral(tracks), {}
 
         # 3. Pop/Band (Default)
-        return self._assign_band(tracks)
+        return self._assign_band_with_tracks(tracks)
 
     def _assign_band(self, tracks: List[TrackStats], forced_drums: Optional[str] = "DETECT") -> Dict[str, str]:
+        roles, _ = self._assign_band_with_tracks(tracks, forced_drums=forced_drums)
+        return roles
+
+    def _assign_band_with_tracks(
+        self, tracks: List[TrackStats], forced_drums: Optional[str] = "DETECT"
+    ) -> Tuple[Dict[str, str], Dict[str, List[int]]]:
         if forced_drums == "DETECT":
-            drums = self._detect_drums(tracks)
+            drum_tracks = self._find_drum_tracks(tracks)
+            drums = "STANDARD_DRUMS" if drum_tracks else None
         else:
             drums = forced_drums
+            drum_tracks = self._find_drum_tracks(tracks) if forced_drums else []
 
-        melody = self._pick_melody(tracks, drums)
-        bass = self._pick_bass(tracks, drums)
-        harmony = self._pick_harmony(tracks, drums, melody, bass)
+        melody_track = self._pick_melody(tracks)
+        bass_track = self._pick_bass(tracks)
+        harmony_track = self._pick_harmony(tracks, melody_track, bass_track)
 
-        return {
-            "MELODY": melody if melody else "UNKNOWN",
-            "HARMONY": harmony if harmony else "UNKNOWN",
-            "BASS": bass if bass else "UNKNOWN",
+        roles = {
+            "MELODY": self._instrument_name(melody_track) if melody_track else "UNKNOWN",
+            "HARMONY": self._instrument_name(harmony_track) if harmony_track else "UNKNOWN",
+            "BASS": self._instrument_name(bass_track) if bass_track else "UNKNOWN",
             "DRUMS": drums if drums else "UNKNOWN",
         }
+        role_tracks = {
+            "MELODY": [melody_track.idx] if melody_track else [],
+            "HARMONY": [harmony_track.idx] if harmony_track else [],
+            "BASS": [bass_track.idx] if bass_track else [],
+            "DRUMS": drum_tracks,
+        }
+        return roles, role_tracks
 
     def _assign_orchestral(self, tracks: List[TrackStats]) -> Dict[str, str]:
         # Map GM programs to Families
@@ -213,14 +238,20 @@ class InstrumentRoleAssigner:
 
     # ---- Role pickers ----
     def _detect_drums(self, tracks: List[TrackStats]) -> Optional[str]:
+        return "STANDARD_DRUMS" if self._find_drum_tracks(tracks) else None
+
+    def _find_drum_tracks(self, tracks: List[TrackStats]) -> List[int]:
+        drum_tracks = []
         for tr in tracks:
             if tr.instrument.is_drum:
-                return "STANDARD_DRUMS"
-            if "DRUM" in tr.name_hint.upper() or "PERC" in tr.name_hint.upper():
-                return "STANDARD_DRUMS"
-        return None
+                drum_tracks.append(tr.idx)
+                continue
+            hint = tr.name_hint.upper()
+            if "DRUM" in hint or "PERC" in hint:
+                drum_tracks.append(tr.idx)
+        return drum_tracks
 
-    def _pick_melody(self, tracks: List[TrackStats], drums: Optional[str]) -> Optional[str]:
+    def _pick_melody(self, tracks: List[TrackStats]) -> Optional[TrackStats]:
         candidates = []
         for tr in tracks:
             if tr.instrument.is_drum:
@@ -235,9 +266,9 @@ class InstrumentRoleAssigner:
         if not candidates:
             return None
         candidates.sort(key=lambda x: x[0], reverse=True)
-        return self._instrument_name(candidates[0][1])
+        return candidates[0][1]
 
-    def _pick_bass(self, tracks: List[TrackStats], drums: Optional[str]) -> Optional[str]:
+    def _pick_bass(self, tracks: List[TrackStats]) -> Optional[TrackStats]:
         candidates = []
         for tr in tracks:
             if tr.instrument.is_drum or tr.note_count == 0:
@@ -252,20 +283,22 @@ class InstrumentRoleAssigner:
         if not candidates:
             return None
         candidates.sort(key=lambda x: x[0])
-        return self._instrument_name(candidates[0][1])
+        return candidates[0][1]
 
     def _pick_harmony(
         self,
         tracks: List[TrackStats],
-        drums: Optional[str],
-        melody: Optional[str],
-        bass: Optional[str],
-    ) -> Optional[str]:
-        used_names = {melody, bass, drums}
+        melody: Optional[TrackStats],
+        bass: Optional[TrackStats],
+    ) -> Optional[TrackStats]:
+        used_indices = set()
+        if melody:
+            used_indices.add(melody.idx)
+        if bass:
+            used_indices.add(bass.idx)
         candidates = []
         for tr in tracks:
-            inst_name = self._instrument_name(tr)
-            if inst_name in used_names:
+            if tr.idx in used_indices:
                 continue
             if tr.instrument.is_drum or tr.note_count == 0:
                 continue
@@ -277,7 +310,7 @@ class InstrumentRoleAssigner:
         if not candidates:
             return None
         candidates.sort(key=lambda x: x[0], reverse=True)
-        return self._instrument_name(candidates[0][1])
+        return candidates[0][1]
 
     # ---- Helpers ----
     def _name_bonus(self, name: str, keywords: List[str]) -> float:

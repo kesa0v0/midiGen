@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pretty_midi
@@ -31,24 +31,43 @@ class ChordProgressionExtractor:
         num, den = bar.get("time_sig", (4, 4))
         return int(num)
 
-    def __init__(self, grid_unit: str = "1/4", min_notes: int = 2, min_confidence: float = 0.2):
+    def __init__(
+        self,
+        grid_unit: str = "1/4",
+        min_notes: int = 2,
+        min_confidence: float = 0.2,
+        bass_role_weight: float = 8.0,
+        min_pitch_boost: float = 2.0,
+        sus_penalty: float = 0.03,
+        sus_third_penalty: float = 0.3,
+        sus_tiebreak_margin: float = 0.1,
+        diatonic_bonus: float = 0.12,
+        nondiatonic_penalty: float = 0.08,
+    ):
         self.grid_unit = grid_unit
         self.min_notes = min_notes
         self.min_confidence = min_confidence
+        self.bass_role_weight = max(1.0, float(bass_role_weight))
+        self.min_pitch_boost = max(0.0, float(min_pitch_boost))
+        self.sus_penalty = max(0.0, float(sus_penalty))
+        self.sus_third_penalty = max(0.0, float(sus_third_penalty))
+        self.sus_tiebreak_margin = max(0.0, float(sus_tiebreak_margin))
+        self.diatonic_bonus = max(0.0, float(diatonic_bonus))
+        self.nondiatonic_penalty = max(0.0, float(nondiatonic_penalty))
 
-        # 1. Detection Templates (Broad detection for accuracy)
+        # 1. Detection Templates (Weighted intervals for accuracy)
         self.templates = {
-            "maj": [0, 4, 7],
-            "min": [0, 3, 7],
-            "dim": [0, 3, 6],
-            "aug": [0, 4, 8],          # Detect aug
-            "sus2": [0, 2, 7],         # Detect sus2
-            "sus4": [0, 5, 7],
-            "7": [0, 4, 7, 10],
-            "maj7": [0, 4, 7, 11],
-            "m7": [0, 3, 7, 10],
-            "dim7": [0, 3, 6, 9],      # Detect dim7
-            "m7b5": [0, 3, 6, 10],     # Detect m7b5
+            "maj": {0: 1.0, 4: 1.0, 7: 0.5},
+            "min": {0: 1.0, 3: 1.0, 7: 0.5},
+            "dim": {0: 1.0, 3: 1.0, 6: 0.5},
+            "aug": {0: 1.0, 4: 1.0, 8: 0.5},      # Detect aug
+            "sus2": {0: 1.0, 2: 0.8, 7: 0.5},     # Detect sus2
+            "sus4": {0: 1.0, 5: 0.8, 7: 0.5},
+            "7": {0: 1.0, 4: 1.0, 7: 0.5, 10: 0.8},
+            "maj7": {0: 1.0, 4: 1.0, 7: 0.5, 11: 0.8},
+            "m7": {0: 1.0, 3: 1.0, 7: 0.5, 10: 0.8},
+            "dim7": {0: 1.0, 3: 1.0, 6: 0.5, 9: 0.8},   # Detect dim7
+            "m7b5": {0: 1.0, 3: 1.0, 6: 0.5, 10: 0.8},  # Detect m7b5
         }
 
         # 2. Strategic Vocabulary Mapping (Compression)
@@ -95,6 +114,9 @@ class ChordProgressionExtractor:
         running_chord: Optional[ChordCandidate] = None
         prog_grid: List[List[str]] = []
 
+        role_tracks = analysis.get("role_tracks") or {}
+        bass_track_ids = set(role_tracks.get("BASS") or [])
+
         for bar in section_bars:
             bar_tokens: List[str] = []
             
@@ -111,7 +133,14 @@ class ChordProgressionExtractor:
                 e_time = s_time + beat_dur
 
                 # Detect chord for this beat
-                chord = self._chord_for_window(midi, s_time, e_time, min_notes=self.min_notes)
+                chord = self._chord_for_window(
+                    midi,
+                    s_time,
+                    e_time,
+                    min_notes=self.min_notes,
+                    bass_track_ids=bass_track_ids,
+                    key=roman_key,
+                )
                 
                 # Stabilization: Use running chord if detection is weak/empty
                 if chord is None or chord.score < self.min_confidence:
@@ -145,16 +174,25 @@ class ChordProgressionExtractor:
         return prog_grid
 
     # ---- Chord detection ----
-    def _chord_for_window(self, midi: pretty_midi.PrettyMIDI, start: float, end: float, min_notes: int = 1) -> Optional[ChordCandidate]:
+    def _chord_for_window(
+        self,
+        midi: pretty_midi.PrettyMIDI,
+        start: float,
+        end: float,
+        min_notes: int = 1,
+        bass_track_ids: Optional[Set[int]] = None,
+    ) -> Optional[ChordCandidate]:
         hist = np.zeros(12, dtype=float)
         note_count = 0
         
         min_pitch = 128
         bass_weight = 0.0
+        bass_role_active = False
 
-        for inst in midi.instruments:
+        for inst_idx, inst in enumerate(midi.instruments):
             if inst.is_drum:
                 continue
+            is_bass_role = bool(bass_track_ids) and inst_idx in bass_track_ids
             for note in inst.notes:
                 if note.start >= end or note.end <= start:
                     continue
@@ -162,10 +200,14 @@ class ChordProgressionExtractor:
                 if overlap <= 0:
                     continue
                 weight = note.velocity * overlap
-                hist[note.pitch % 12] += weight
+                pitch_class = note.pitch % 12
+                hist[pitch_class] += weight
+                if is_bass_role:
+                    hist[pitch_class] += weight * (self.bass_role_weight - 1.0)
+                    bass_role_active = True
                 note_count += 1
                 
-                # Bass Boost Logic: Track the lowest pitch in the window
+                # Track lowest pitch as a fallback when no bass-role notes are active.
                 if note.pitch < min_pitch:
                     min_pitch = note.pitch
                     bass_weight = weight
@@ -176,25 +218,42 @@ class ChordProgressionExtractor:
         if hist.sum() == 0 or note_count < min_notes:
             return None
             
-        # Apply Bass Boost: Add extra weight to the bass note's pitch class
-        # Adding 2.0 * bass_weight brings the total contribution of the bass to ~3x (1x original + 2x boost)
-        if min_pitch < 128:
-            hist[min_pitch % 12] += bass_weight * 2.0
+        # Apply lowest-pitch boost only when no bass-role notes are active in the window.
+        if not bass_role_active and min_pitch < 128 and self.min_pitch_boost > 0:
+            hist[min_pitch % 12] += bass_weight * self.min_pitch_boost
 
         best: Optional[ChordCandidate] = None
+        best_simple: Optional[ChordCandidate] = None
         for root in range(12):
             for quality, intervals in self.templates.items():
                 tpl = np.zeros(12)
-                tpl[[ (root + i) % 12 for i in intervals ]] = 1.0
+                for interval, weight in intervals.items():
+                    tpl[(root + interval) % 12] = weight
                 score = self._cosine_similarity(hist, tpl)
-                # Triad Bias: 단순 코드(maj, min)에 가산점, sus4는 소폭 가산점
+                # Minimal triad bias; sus handled via penalties below.
                 if quality in ["maj", "min"]:
-                    score += 0.15
-                elif quality in ["sus4"]:
-                    score += 0.05
+                    score += 0.02
+                if quality in ["sus2", "sus4"]:
+                    score -= self.sus_penalty
+                    third_strength = max(
+                        hist[(root + 3) % 12],
+                        hist[(root + 4) % 12],
+                    )
+                    if hist.sum() > 0 and third_strength >= 0.2 * hist.sum():
+                        score -= self.sus_third_penalty
                 # 7th, sus4 등은 점수가 확실히 높을 때만 선택됨
+                if quality in ["maj", "min"]:
+                    if best_simple is None or score > best_simple.score:
+                        best_simple = ChordCandidate(root, quality, score)
                 if best is None or score > best.score:
                     best = ChordCandidate(root, quality, score)
+        if (
+            best
+            and best.quality in ["sus2", "sus4"]
+            and best_simple
+            and (best.score - best_simple.score) <= self.sus_tiebreak_margin
+        ):
+            best = ChordCandidate(best_simple.root_pc, best_simple.quality, best_simple.score)
         return best
 
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:

@@ -50,7 +50,8 @@ class DatasetBuilder:
             key_val = key_result.section_keys.get(sec.id)
             sec.local_key = None if key_val in (None, "KEEP") else key_val
 
-        instruments = InstrumentRoleAssigner().assign(midi, inst_type=inst_type)
+        instruments, role_tracks = InstrumentRoleAssigner().assign_with_tracks(midi, inst_type=inst_type)
+        analysis["role_tracks"] = role_tracks
 
         prog_extractor = ChordProgressionExtractor()
         ctrl_extractor = ControlTokenExtractor()
