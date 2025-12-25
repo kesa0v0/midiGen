@@ -86,7 +86,8 @@ class ChordProgressionExtractor:
         section_bars = bars[section.start_bar : section.end_bar]
         global_key = analysis.get("global_key")
         # Roman 변환 시에는 global_key만 사용 (section_key가 'KEEP'이거나 None이면 global_key)
-        roman_key = global_key
+        roman_key = section.local_key or global_key
+        absolute_chords = bool(analysis.get("absolute_chords", False))
         
         # Ensure slots_per_bar is valid
         slots_per_bar = max(1, int(slots_per_bar))
@@ -119,7 +120,13 @@ class ChordProgressionExtractor:
                     running_chord = chord
 
                 # Tokenize: N.C. or Roman (항상 global_key 기준)
-                token = "N.C." if chord is None else self._roman(chord, roman_key)
+                if chord is None:
+                    token = "N.C."
+                elif absolute_chords:
+                    target_quality = self.quality_map.get(chord.quality, "maj")
+                    token = self._absolute_chord(chord.root_pc, target_quality)
+                else:
+                    token = self._roman(chord, roman_key)
                 
                 # Fill slots for this beat
                 # First slot gets the token, others get sustain "-"
@@ -149,19 +156,22 @@ class ChordProgressionExtractor:
             if inst.is_drum:
                 continue
             for note in inst.notes:
-                if start <= note.start < end:
-                    overlap = max(0.0, min(note.end, end) - note.start)
-                    weight = note.velocity * (overlap if overlap > 0 else 1.0)
-                    hist[note.pitch % 12] += weight
-                    note_count += 1
-                    
-                    # Bass Boost Logic: Track the lowest pitch in the window
-                    if note.pitch < min_pitch:
-                        min_pitch = note.pitch
-                        bass_weight = weight
-                    elif note.pitch == min_pitch:
-                        # If multiple notes have the same lowest pitch, take the max weight
-                        bass_weight = max(bass_weight, weight)
+                if note.start >= end or note.end <= start:
+                    continue
+                overlap = min(note.end, end) - max(note.start, start)
+                if overlap <= 0:
+                    continue
+                weight = note.velocity * overlap
+                hist[note.pitch % 12] += weight
+                note_count += 1
+                
+                # Bass Boost Logic: Track the lowest pitch in the window
+                if note.pitch < min_pitch:
+                    min_pitch = note.pitch
+                    bass_weight = weight
+                elif note.pitch == min_pitch:
+                    # If multiple notes have the same lowest pitch, take the max weight
+                    bass_weight = max(bass_weight, weight)
 
         if hist.sum() == 0 or note_count < min_notes:
             return None

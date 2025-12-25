@@ -50,6 +50,16 @@ def parse_args():
         default="UNKNOWN",
         help="Instrument type metadata",
     )
+    parser.add_argument(
+        "--debug-key",
+        action="store_true",
+        help="Print key detection debug info",
+    )
+    parser.add_argument(
+        "--abs-chords",
+        action="store_true",
+        help="Output absolute chord names instead of roman numerals",
+    )
     return parser.parse_args()
 
 
@@ -76,7 +86,9 @@ def main():
             genre=args.genre,
             style=args.style,
             artist=args.artist,
-            inst_type=args.inst_type
+            inst_type=args.inst_type,
+            debug_key=args.debug_key,
+            abs_chords=args.abs_chords,
         )
         print(f"[DONE] Processing complete. Check output in {output_path}")
     except Exception as e:

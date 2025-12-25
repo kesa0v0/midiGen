@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 
+import pretty_midi
 from music21 import converter, stream, key as m21key, pitch as m21pitch
 
 
@@ -43,11 +45,32 @@ class KeyDetector:
     Global key + per-section key candidate를 music21로 추정한다.
     결정은 보수적으로 하고, 불확실하면 UNKNOWN/KEEP로 남긴다.
     """
-    def __init__(self, min_mod_bars: int = 4, stability_windows: int = 3):
+    def __init__(
+        self,
+        min_mod_bars: int = 4,
+        stability_windows: int = 3,
+        hist_override_margin: float = 0.08,
+        low_pitch_threshold: int = 52,
+        low_pitch_boost: float = 0.6,
+        diatonic_override_margin: float = 0.08,
+        diatonic_min_ratio: float = 0.55,
+    ):
         self.min_mod_bars = min_mod_bars
         self.stability_windows = stability_windows
+        self.hist_override_margin = hist_override_margin
+        self.low_pitch_threshold = low_pitch_threshold
+        self.low_pitch_boost = low_pitch_boost
+        self.diatonic_override_margin = diatonic_override_margin
+        self.diatonic_min_ratio = diatonic_min_ratio
 
-    def detect(self, midi_path: str, sections: List[Tuple[str, int, int]]) -> KeyResult:
+    def detect(
+        self,
+        midi_path: str,
+        sections: List[Tuple[str, int, int]],
+        debug: bool = False,
+        midi: Optional[pretty_midi.PrettyMIDI] = None,
+        resolve_diatonic: bool = True,
+    ) -> KeyResult:
         """
         sections: list of (section_id, start_bar_inclusive, end_bar_exclusive)
         bar index는 0-based, end_bar는 exclusive로 가정.
@@ -58,8 +81,52 @@ class KeyDetector:
         # "민주주의의 함정" 해결: 베이스 파트의 비중을 높여 화성학적 뿌리를 강조
         score = self._apply_bass_weights(score, weight=5)
 
-        global_key = self._detect_global_key(score)
+        global_key = self._detect_global_key(score, midi_path=midi_path, debug=debug)
+        diatonic_override = False
+        diatonic_key = None
+        diatonic_ratio = None
+        base_diatonic_ratio = None
+        if resolve_diatonic and midi is not None:
+            diatonic_hist = self._pc_histogram_pretty_midi(midi)
+            if sum(diatonic_hist) > 0:
+                tonic_pc, mode, ratio = self._best_key_by_diatonic_ratio(diatonic_hist)
+                diatonic_ratio = ratio
+                if tonic_pc is not None:
+                    diatonic_key = m21key.Key(tonic=m21pitch.Pitch(tonic_pc), mode=mode)
+                    if global_key is None:
+                        diatonic_override = True
+                        global_key = diatonic_key
+                    else:
+                        base_mode = global_key.mode if global_key.mode in ["major", "minor"] else "major"
+                        base_diatonic_ratio = self._diatonic_ratio(
+                            diatonic_hist,
+                            global_key.tonic.pitchClass,
+                            base_mode,
+                        )
+                        if (
+                            diatonic_ratio - base_diatonic_ratio >= self.diatonic_override_margin
+                            and diatonic_ratio >= self.diatonic_min_ratio
+                        ):
+                            diatonic_override = True
+                            global_key = diatonic_key
         global_key_str = KeyStringNormalizer.normalize(global_key)
+        if debug and resolve_diatonic and midi is not None:
+            base_ratio_str = f"{base_diatonic_ratio:.3f}" if base_diatonic_ratio is not None else "NA"
+            diatonic_ratio_str = f"{diatonic_ratio:.3f}" if diatonic_ratio is not None else "NA"
+            diatonic_key_str = KeyStringNormalizer.normalize(diatonic_key)
+            print(
+                f"[KeyDetector] diatonic_key={diatonic_key_str} "
+                f"diatonic_ratio={diatonic_ratio_str} base_ratio={base_ratio_str} "
+                f"override_margin={self.diatonic_override_margin:.3f} "
+                f"min_ratio={self.diatonic_min_ratio:.3f} "
+                f"override={str(diatonic_override)}"
+            )
+
+        if diatonic_override:
+            section_key_map = {sec_id: "KEEP" for sec_id, _, _ in sections}
+            if debug:
+                print("[KeyDetector] section_key_override=KEEP (diatonic override)")
+            return KeyResult(global_key=global_key_str, section_keys=section_key_map)
 
         section_key_map: Dict[str, str] = {}
         for sec_id, start_bar, end_bar in sections:
@@ -142,7 +209,12 @@ class KeyDetector:
                 
         return False
 
-    def _detect_global_key(self, score: stream.Score) -> Optional[m21key.Key]:
+    def _detect_global_key(
+        self,
+        score: stream.Score,
+        midi_path: Optional[str] = None,
+        debug: bool = False,
+    ) -> Optional[m21key.Key]:
         # 1) music21 basic analysis
         m21_key = None
         try:
@@ -162,9 +234,41 @@ class KeyDetector:
             except Exception:
                 pass
 
-        # 2) Heuristic Correction: Start/End Bass Note
+        # 2) Histogram fallback and override
+        hist = self._pc_histogram(
+            score,
+            low_pitch_threshold=self.low_pitch_threshold,
+            low_pitch_boost=self.low_pitch_boost,
+        )
+        raw_hist = self._pc_histogram(score) if debug else None
+        hist_key = None
+        hist_score = 0.0
+        if sum(hist) > 0:
+            tonic_pc, mode, hist_score = self._best_key_from_histogram(hist)
+            if tonic_pc is not None:
+                hist_key = m21key.Key(tonic=m21pitch.Pitch(tonic_pc), mode=mode)
+
+        base_key = m21_key
+        m21_score = None
+        if hist_key is not None:
+            if m21_key is None:
+                base_key = hist_key
+            else:
+                m21_mode = m21_key.mode if m21_key.mode in ["major", "minor"] else "major"
+                m21_score = self._key_profile_score(
+                    hist,
+                    m21_key.tonic.pitchClass,
+                    m21_mode,
+                )
+                if hist_score - m21_score >= self.hist_override_margin:
+                    base_key = hist_key
+
+        # 3) Heuristic Correction: Start/End Bass Note
         # Pop music often starts and ends on the Tonic (I).
         # If the bass note of the first and last measure match, use it as the tonic.
+        start_bass = None
+        end_bass = None
+        bass_override_key = None
         try:
             start_bass = self._get_measure_bass(score, 1)
             
@@ -186,24 +290,59 @@ class KeyDetector:
             
             end_bass = self._get_measure_bass(score, last_measure_num) if last_measure_num > 0 else None
 
+            if start_bass is None or end_bass is None:
+                first_with_notes, last_with_notes = self._first_last_measure_with_notes(score)
+                if start_bass is None and first_with_notes is not None:
+                    start_bass = self._get_measure_bass(score, first_with_notes)
+                if end_bass is None and last_with_notes is not None:
+                    end_bass = self._get_measure_bass(score, last_with_notes)
+
             if start_bass is not None and end_bass is not None and start_bass == end_bass:
                 heuristic_tonic = start_bass
                 
-                # If m21_key is None or its tonic disagrees with our strong heuristic
-                if m21_key is None or m21_key.tonic.pitchClass != heuristic_tonic:
+                # If base_key is None or its tonic disagrees with our strong heuristic
+                if base_key is None or base_key.tonic.pitchClass != heuristic_tonic:
                     # Use the heuristic tonic.
-                    # Preserve mode from m21_key if available, else default to 'major'
-                    mode = m21_key.mode if m21_key and m21_key.mode in ['major', 'minor'] else 'major'
+                    # Preserve mode from base_key if available, else default to 'major'
+                    mode = (
+                        base_key.mode
+                        if base_key and base_key.mode in ["major", "minor"]
+                        else "major"
+                    )
                     
                     # Create new Key object
                     new_key = m21key.Key(tonic=m21pitch.Pitch(heuristic_tonic), mode=mode)
-                    return new_key
+                    bass_override_key = new_key
 
         except Exception as e:
             # If heuristics fail, ignore and return m21_key
             pass
 
-        return m21_key
+        final_key = bass_override_key or base_key
+        if debug:
+            m21_key_str = KeyStringNormalizer.normalize(m21_key)
+            hist_key_str = KeyStringNormalizer.normalize(hist_key)
+            base_key_str = KeyStringNormalizer.normalize(base_key)
+            final_key_str = KeyStringNormalizer.normalize(final_key)
+            m21_score_str = f"{m21_score:.3f}" if m21_score is not None else "NA"
+            path_str = midi_path or "<unknown>"
+            print(f"[KeyDetector] midi={path_str}")
+            print(
+                f"[KeyDetector] m21_key={m21_key_str} hist_key={hist_key_str} "
+                f"hist_score={hist_score:.3f} m21_score={m21_score_str} "
+                f"override_margin={self.hist_override_margin:.3f} "
+                f"low_boost={self.low_pitch_boost:.2f} low_thresh={self.low_pitch_threshold}"
+            )
+            if raw_hist is not None:
+                print(f"[KeyDetector] hist_top={self._top_pcs(hist)} raw_top={self._top_pcs(raw_hist)}")
+            print(
+                f"[KeyDetector] pre_bass={base_key_str} "
+                f"bass_start={self._pc_name(start_bass)} "
+                f"bass_end={self._pc_name(end_bass)} "
+                f"final_key={final_key_str}"
+            )
+
+        return final_key
 
     def _get_measure_bass(self, score: stream.Score, measure_num: int) -> Optional[int]:
         """
@@ -283,6 +422,236 @@ class KeyDetector:
         try:
             seg = score.measures(m1, m2)
             k = seg.analyze("key")
-            return k if isinstance(k, m21key.Key) else None
+            if isinstance(k, m21key.Key):
+                return k
+            hist_key, _ = self._detect_key_by_histogram(seg)
+            return hist_key
         except Exception:
             return None
+
+    def _detect_key_by_histogram(self, score: stream.Score) -> Tuple[Optional[m21key.Key], float]:
+        hist = self._pc_histogram(
+            score,
+            low_pitch_threshold=self.low_pitch_threshold,
+            low_pitch_boost=self.low_pitch_boost,
+        )
+        if sum(hist) <= 0:
+            return None, 0.0
+        tonic_pc, mode, score_val = self._best_key_from_histogram(hist)
+        if tonic_pc is None:
+            return None, 0.0
+        return m21key.Key(tonic=m21pitch.Pitch(tonic_pc), mode=mode), score_val
+
+    def _pc_histogram(
+        self,
+        score: stream.Score,
+        low_pitch_threshold: Optional[int] = None,
+        low_pitch_boost: float = 0.0,
+    ) -> List[float]:
+        hist = [0.0] * 12
+        for n in score.recurse().notes:
+            try:
+                if n.isNote:
+                    if getattr(n, "isUnpitched", False):
+                        continue
+                    pc = n.pitch.pitchClass
+                    weight = self._note_weight(n)
+                    weight *= self._low_pitch_multiplier(
+                        n.pitch.midi,
+                        low_pitch_threshold,
+                        low_pitch_boost,
+                    )
+                    hist[pc] += weight
+                elif n.isChord:
+                    weight = self._note_weight(n)
+                    pitches = n.pitches
+                    if not pitches:
+                        continue
+                    per_pitch = weight / len(pitches)
+                    for p in pitches:
+                        boost = self._low_pitch_multiplier(
+                            p.midi,
+                            low_pitch_threshold,
+                            low_pitch_boost,
+                        )
+                        hist[p.pitchClass] += per_pitch * boost
+            except Exception:
+                continue
+        return hist
+
+    def _pc_histogram_pretty_midi(self, midi: pretty_midi.PrettyMIDI) -> List[float]:
+        hist = [0.0] * 12
+        for inst in midi.instruments:
+            if inst.is_drum:
+                continue
+            for note in inst.notes:
+                if note.end <= note.start:
+                    continue
+                dur = max(0.0, note.end - note.start)
+                weight = max(0.0, dur) * max(0.5, float(note.velocity) / 64.0)
+                weight *= self._low_pitch_multiplier(
+                    note.pitch,
+                    self.low_pitch_threshold,
+                    self.low_pitch_boost,
+                )
+                hist[note.pitch % 12] += weight
+        return hist
+
+    def _best_key_by_diatonic_ratio(self, hist: List[float]) -> Tuple[Optional[int], str, float]:
+        if sum(hist) <= 0:
+            return None, "major", 0.0
+        best_tonic = None
+        best_mode = "major"
+        best_ratio = -1.0
+        best_profile = -1.0
+        eps = 1e-6
+        for tonic in range(12):
+            for mode in ("major", "minor"):
+                ratio = self._diatonic_ratio(hist, tonic, mode)
+                if ratio > best_ratio + eps:
+                    best_ratio = ratio
+                    best_tonic = tonic
+                    best_mode = mode
+                    best_profile = self._key_profile_score(hist, tonic, mode)
+                elif abs(ratio - best_ratio) <= eps:
+                    profile = self._key_profile_score(hist, tonic, mode)
+                    if profile > best_profile:
+                        best_ratio = ratio
+                        best_tonic = tonic
+                        best_mode = mode
+                        best_profile = profile
+        return best_tonic, best_mode, best_ratio
+
+    def _diatonic_ratio(self, hist: List[float], tonic_pc: int, mode: str) -> float:
+        total = sum(hist)
+        if total <= 0:
+            return 0.0
+        if mode == "minor":
+            degrees = [0, 2, 3, 5, 7, 8, 10]
+        else:
+            degrees = [0, 2, 4, 5, 7, 9, 11]
+        diatonic = sum(hist[(tonic_pc + d) % 12] for d in degrees)
+        return diatonic / total
+
+    def _note_weight(self, n) -> float:
+        try:
+            dur = float(n.duration.quarterLength) if n.duration else 1.0
+        except Exception:
+            dur = 1.0
+        dur = max(0.0, dur)
+        vel = None
+        try:
+            if n.volume is not None:
+                vel = n.volume.velocity
+        except Exception:
+            vel = None
+        if vel is None:
+            return dur if dur > 0 else 1.0
+        return max(dur, 0.0) * max(0.5, float(vel) / 64.0)
+
+    def _best_key_from_histogram(self, hist: List[float]) -> Tuple[Optional[int], str, float]:
+        major_profile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+        minor_profile = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+
+        hist_norm = self._normalize_vec(hist)
+        if not hist_norm:
+            return None, "major", 0.0
+
+        best_tonic = None
+        best_mode = "major"
+        best_score = -1.0
+        for tonic in range(12):
+            maj_score = self._key_profile_score(
+                hist_norm,
+                tonic,
+                "major",
+                major_profile,
+                minor_profile,
+            )
+            if maj_score > best_score:
+                best_score = maj_score
+                best_tonic = tonic
+                best_mode = "major"
+            min_score = self._key_profile_score(
+                hist_norm,
+                tonic,
+                "minor",
+                major_profile,
+                minor_profile,
+            )
+            if min_score > best_score:
+                best_score = min_score
+                best_tonic = tonic
+                best_mode = "minor"
+
+        return best_tonic, best_mode, best_score
+
+    def _key_profile_score(
+        self,
+        hist_norm: List[float],
+        tonic_pc: int,
+        mode: str,
+        major_profile: Optional[List[float]] = None,
+        minor_profile: Optional[List[float]] = None,
+    ) -> float:
+        if major_profile is None:
+            major_profile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+        if minor_profile is None:
+            minor_profile = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+
+        hist = self._normalize_vec(hist_norm)
+        if not hist:
+            return 0.0
+        profile = major_profile if mode == "major" else minor_profile
+        rotated = self._rotate_profile(profile, tonic_pc)
+        prof_norm = self._normalize_vec(rotated)
+        if not prof_norm:
+            return 0.0
+        return sum(h * p for h, p in zip(hist, prof_norm))
+
+    def _rotate_profile(self, profile: List[float], steps: int) -> List[float]:
+        return [profile[(i - steps) % 12] for i in range(12)]
+
+    def _normalize_vec(self, vec: List[float]) -> List[float]:
+        norm = math.sqrt(sum(v * v for v in vec))
+        if norm == 0:
+            return []
+        return [v / norm for v in vec]
+
+    def _pc_name(self, pc: Optional[int]) -> str:
+        if pc is None:
+            return "NA"
+        names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        return names[pc % 12]
+
+    def _low_pitch_multiplier(
+        self,
+        pitch: int,
+        threshold: Optional[int],
+        boost: float,
+    ) -> float:
+        if threshold is None or boost <= 0:
+            return 1.0
+        return 1.0 + boost if pitch <= threshold else 1.0
+
+    def _top_pcs(self, hist: List[float], top_n: int = 5) -> List[str]:
+        names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        ranked = sorted(range(12), key=lambda i: hist[i], reverse=True)
+        return [f"{names[i]}:{hist[i]:.3f}" for i in ranked[:top_n]]
+
+    def _first_last_measure_with_notes(self, score: stream.Score) -> Tuple[Optional[int], Optional[int]]:
+        first = None
+        last = None
+        try:
+            for p in score.parts:
+                for m in p.getElementsByClass("Measure"):
+                    if not m.notes:
+                        continue
+                    num = m.number
+                    if first is None or num < first:
+                        first = num
+                    if last is None or num > last:
+                        last = num
+        except Exception:
+            return None, None
+        return first, last

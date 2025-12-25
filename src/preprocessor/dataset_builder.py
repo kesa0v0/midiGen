@@ -18,7 +18,9 @@ class DatasetBuilder:
         genre: str = "UNKNOWN",
         style: str = "UNKNOWN",
         artist: str = "UNKNOWN",
-        inst_type: str = "UNKNOWN"
+        inst_type: str = "UNKNOWN",
+        debug_key: bool = False,
+        abs_chords: bool = False,
     ):
         midi_data = MidiLoader().load(midi_path)
         if midi_data is None:
@@ -34,11 +36,14 @@ class DatasetBuilder:
         analysis["ticks_per_beat"] = midi_data.ticks_per_beat
         analysis["channel_programs"] = midi_data.channel_programs
         analysis["source_path"] = midi_path
+        analysis["absolute_chords"] = abs_chords
 
         sections = StructureExtractor().extract_sections(midi, analysis)
         key_result = KeyDetector().detect(
             midi_path,
             [(sec.id, sec.start_bar, sec.end_bar) for sec in sections],
+            debug=debug_key,
+            midi=midi,
         )
         analysis["global_key"] = key_result.global_key
         for sec in sections:
