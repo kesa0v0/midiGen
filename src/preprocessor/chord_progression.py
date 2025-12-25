@@ -16,15 +16,17 @@ class ChordCandidate:
     score: float
 
 
-
 class ChordProgressionExtractor:
 
     """
-    Strategic Compression Chord Extraction.
+    Strategic Compression Chord Extraction with Viterbi / HMM.
     - Detection: High resolution (includes aug, dim7, etc.)
     - Output: Compressed to 8 core tokens (Strategic Vocabulary)
     - Mapping: Strict Chromatic Scale Degree (No functional interpretation)
     - Resolution: Beat-level (1 chord per beat) to prevent hyperactivity
+    - Smoothing: Viterbi algorithm for context-aware chord selection
+    - Root Anchor: Statistical reliance on strongest BASS track note for root detection
+    - Inversion Aware: Supports recognition of 3rd/5th in bass
     """
 
     def _slots_per_bar(self, bar: Dict) -> int:
@@ -36,7 +38,7 @@ class ChordProgressionExtractor:
         grid_unit: str = "1/4",
         min_notes: int = 2,
         min_confidence: float = 0.2,
-        bass_role_weight: float = 8.0,
+        bass_role_weight: float = 4.0,
         min_pitch_boost: float = 2.0,
         sus_penalty: float = 0.03,
         sus_third_penalty: float = 0.3,
@@ -44,8 +46,9 @@ class ChordProgressionExtractor:
         diatonic_bonus: float = 0.12,
         nondiatonic_penalty: float = 0.08,
         melody_penalty: float = 0.2,
-        harmony_boost: float = 3.0,
-        bass_root_bonus: float = 0.1,
+        harmony_boost: float = 2.5,
+        bass_root_bonus: float = 2.0,
+        triad_bonus: float = 0.05,
     ):
         self.grid_unit = grid_unit
         self.min_notes = min_notes
@@ -60,46 +63,39 @@ class ChordProgressionExtractor:
         self.melody_penalty = melody_penalty
         self.harmony_boost = harmony_boost
         self.bass_root_bonus = bass_root_bonus
+        self.triad_bonus = triad_bonus
 
-        # 1. Detection Templates (Weighted intervals for accuracy)
+        # 1. Detection Templates (Balanced for general musicality)
         self.templates = {
-            "maj": {0: 1.0, 4: 1.0, 7: 0.5},
-            "min": {0: 1.0, 3: 1.0, 7: 0.5},
-            "dim": {0: 1.0, 3: 1.0, 6: 0.5},
-            "aug": {0: 1.0, 4: 1.0, 8: 0.5},      # Detect aug
-            "sus2": {0: 1.0, 2: 0.8, 7: 0.5},     # Detect sus2
-            "sus4": {0: 1.0, 5: 0.8, 7: 0.5},
-            "7": {0: 1.0, 4: 1.0, 7: 0.5, 10: 0.8},
-            "maj7": {0: 1.0, 4: 1.0, 7: 0.5, 11: 0.8},
-            "m7": {0: 1.0, 3: 1.0, 7: 0.5, 10: 0.8},
-            "dim7": {0: 1.0, 3: 1.0, 6: 0.5, 9: 0.8},   # Detect dim7
-            "m7b5": {0: 1.0, 3: 1.0, 6: 0.5, 10: 0.8},  # Detect m7b5
+            # Triads: Base priority (1.0), allow 6th degree (0.5) for Pop/Jazz friendliness
+            "maj": {0: 1.0, 4: 1.0, 7: 1.0, 9: 0.5},
+            "min": {0: 1.0, 3: 1.0, 7: 1.0, 9: 0.5},
+
+            # Dominant 7: High priority with guide tone emphasis
+            "7": {0: 0.9, 4: 1.0, 7: 0.5, 10: 1.0},
+
+            # 7th chords: Penalty relaxed (0.9)
+            "maj7": {0: 0.9, 4: 0.9, 7: 0.5, 11: 0.9},
+            "m7":   {0: 0.9, 3: 0.9, 7: 0.5, 10: 0.9},
+
+            # Dim/Aug: Penalty reasonable (0.75 - 0.8)
+            "dim":  {0: 0.75, 3: 0.75, 6: 0.75},
+            "dim7": {0: 0.75, 3: 0.75, 6: 0.75, 9: 0.75},
+            "m7b5": {0: 0.85, 3: 0.85, 6: 0.85, 10: 0.85},
+            "aug":  {0: 0.8, 4: 0.8, 8: 0.8},
+
+            # Sustain
+            "sus4": {0: 0.9, 5: 0.9, 7: 0.5},
+            "sus2": {0: 0.9, 2: 0.9, 7: 0.5},
         }
 
         # 2. Strategic Vocabulary Mapping (Compression)
-        # Raw Quality -> Target Quality (Llama Vocabulary)
         self.quality_map = {
-            # Major Family -> I
-            "maj": "maj",
-            "aug": "maj",  # Aug -> Major (Color removed)
-            "sus2": "maj", # Sus2 -> Major (Color removed)
-            
-            # Minor Family -> i
+            "maj": "maj", "aug": "maj", "sus2": "maj",
             "min": "min",
-            
-            # 7th Family -> I7 / i7 / Imaj7
-            "7": "7",
-            "m7": "m7",
-            "maj7": "maj7",
-            
-            # Sus4 -> Isus4 (Function preserved)
+            "7": "7", "m7": "m7", "maj7": "maj7",
             "sus4": "sus4",
-            
-            # Diminished Family -> io7
-            "dim": "dim7", # Triad dim -> dim7 (Standardization)
-            "dim7": "dim7",
-            
-            # Half-diminished -> ih7 (Function preserved)
+            "dim": "dim7", "dim7": "dim7",
             "m7b5": "m7b5",
         }
 
@@ -110,38 +106,29 @@ class ChordProgressionExtractor:
 
         section_bars = bars[section.start_bar : section.end_bar]
         global_key = analysis.get("global_key")
-        # Roman 변환 시에는 global_key만 사용 (section_key가 'KEEP'이거나 None이면 global_key)
         roman_key = section.local_key or global_key
         absolute_chords = bool(analysis.get("absolute_chords", False))
         
-        # Ensure slots_per_bar is valid
         slots_per_bar = max(1, int(slots_per_bar))
-
-        running_chord: Optional[ChordCandidate] = None
-        prog_grid: List[List[str]] = []
 
         role_tracks = analysis.get("role_tracks") or {}
         bass_track_ids = set(role_tracks.get("BASS") or [])
         melody_track_ids = set(role_tracks.get("MELODY") or [])
         harmony_track_ids = set(role_tracks.get("HARMONY") or [])
 
-        for bar in section_bars:
-            bar_tokens: List[str] = []
-            
-            # Calculate beats to ensure beat-level resolution
+        # --- Step 1: Collect candidates for all beats ---
+        all_beats: List[Tuple[int, int, List[ChordCandidate]]] = []
+        
+        for bar_idx, bar in enumerate(section_bars):
             num, den = bar.get("time_sig", (4, 4))
             beats = max(1, int(num))
-            
-            # Calculate slots per beat (e.g., 4 slots / 4 beats = 1 slot/beat)
-            slots_per_beat = max(1, slots_per_bar // beats)
             beat_dur = (bar["end"] - bar["start"]) / beats
 
             for b in range(beats):
                 s_time = bar["start"] + b * beat_dur
                 e_time = s_time + beat_dur
 
-                # Detect chord for this beat
-                chord = self._chord_for_window(
+                candidates = self._chords_for_window(
                     midi,
                     s_time,
                     e_time,
@@ -150,30 +137,78 @@ class ChordProgressionExtractor:
                     melody_track_ids=melody_track_ids,
                     harmony_track_ids=harmony_track_ids,
                     key=roman_key,
+                    top_k=4
                 )
                 
-                # Stabilization: Use running chord if detection is weak/empty
-                if chord is None or chord.score < self.min_confidence:
-                    chord = running_chord
-                else:
-                    running_chord = chord
+                if not candidates:
+                    candidates = [ChordCandidate(root_pc=0, quality="N.C.", score=0.0)]
+                
+                all_beats.append((bar_idx, b, candidates))
 
-                # Tokenize: N.C. or Roman (항상 global_key 기준)
-                if chord is None:
+        if not all_beats:
+            return []
+
+        # --- Step 2: Viterbi Algorithm ---
+        T = len(all_beats)
+        dp = [np.zeros(len(cands)) for _, _, cands in all_beats]
+        backpointer = [[0] * len(cands) for _, _, cands in all_beats]
+        
+        for i, cand in enumerate(all_beats[0][2]):
+            dp[0][i] = cand.score
+
+        for t in range(1, T):
+            prev_cands = all_beats[t-1][2]
+            curr_cands = all_beats[t][2]
+            
+            for j, curr_cand in enumerate(curr_cands):
+                max_score = -float('inf')
+                best_prev_idx = 0
+                
+                for i, prev_cand in enumerate(prev_cands):
+                    transition = self._get_transition_score(prev_cand, curr_cand)
+                    score = dp[t-1][i] + transition + curr_cand.score
+                    
+                    if score > max_score:
+                        max_score = score
+                        best_prev_idx = i
+                
+                dp[t][j] = max_score
+                backpointer[t][j] = best_prev_idx
+
+        best_path_indices = [0] * T
+        best_end_idx = int(np.argmax(dp[T-1]))
+        best_path_indices[T-1] = best_end_idx
+        
+        for t in range(T-1, 0, -1):
+            best_path_indices[t-1] = backpointer[t][best_path_indices[t]]
+
+        # --- Step 3: Format Output ---
+        prog_grid: List[List[str]] = []
+        beat_idx = 0
+        
+        for bar in section_bars:
+            bar_tokens: List[str] = []
+            num, den = bar.get("time_sig", (4, 4))
+            beats = max(1, int(num))
+            slots_per_beat = max(1, slots_per_bar // beats)
+
+            for b in range(beats):
+                cand_idx = best_path_indices[beat_idx]
+                chord = all_beats[beat_idx][2][cand_idx]
+                beat_idx += 1
+                
+                if chord.quality == "N.C.":
                     token = "N.C."
                 elif absolute_chords:
                     target_quality = self.quality_map.get(chord.quality, "maj")
                     token = self._absolute_chord(chord.root_pc, target_quality)
                 else:
                     token = self._roman(chord, roman_key)
-                
-                # Fill slots for this beat
-                # First slot gets the token, others get sustain "-"
+
                 bar_tokens.append(token)
                 for _ in range(slots_per_beat - 1):
                     bar_tokens.append("-")
 
-            # Handle remainder slots if slots_per_bar isn't perfectly divisible
             if len(bar_tokens) < slots_per_bar:
                 bar_tokens.extend(["-"] * (slots_per_bar - len(bar_tokens)))
             elif len(bar_tokens) > slots_per_bar:
@@ -183,8 +218,26 @@ class ChordProgressionExtractor:
 
         return prog_grid
 
+    def _get_transition_score(self, prev: ChordCandidate, curr: ChordCandidate) -> float:
+        if prev.quality == "N.C." or curr.quality == "N.C.":
+            return 0.0
+            
+        interval = (curr.root_pc - prev.root_pc) % 12
+        score = 0.0
+        
+        if interval == 5: score += 0.2
+        elif interval == 7: score += 0.1
+        elif interval in [1, 2, 10, 11]: score += 0.05
+        elif interval == 0: score += 0.15
+        else: score -= 0.05
+            
+        if "dim" in prev.quality and "maj" in curr.quality:
+            if interval != 1: score -= 0.1
+
+        return score
+
     # ---- Chord detection ----
-    def _chord_for_window(
+    def _chords_for_window(
         self,
         midi: pretty_midi.PrettyMIDI,
         start: float,
@@ -194,21 +247,24 @@ class ChordProgressionExtractor:
         melody_track_ids: Optional[Set[int]] = None,
         harmony_track_ids: Optional[Set[int]] = None,
         key: Optional[str] = None,
-    ) -> Optional[ChordCandidate]:
-        hist = np.zeros(12, dtype=float)
-        note_count = 0
+        top_k: int = 4
+    ) -> List[ChordCandidate]:
         
-        # Track lowest pitch as a fallback/bonus
-        lowest_pitch_class = -1
-        global_min_pitch = 128
+        hist = np.zeros(12, dtype=float)
+        bass_hist = np.zeros(12, dtype=float)
+        has_bass = False
+        note_count = 0
         
         for inst_idx, inst in enumerate(midi.instruments):
             if inst.is_drum:
                 continue
             
             weight_multiplier = 1.0
+            is_bass_track = False
+            
             if bass_track_ids and inst_idx in bass_track_ids:
                 weight_multiplier = self.bass_role_weight
+                is_bass_track = True
             elif melody_track_ids and inst_idx in melody_track_ids:
                 weight_multiplier = self.melody_penalty
             elif harmony_track_ids and inst_idx in harmony_track_ids:
@@ -220,32 +276,37 @@ class ChordProgressionExtractor:
                 overlap = min(note.end, end) - max(note.start, start)
                 if overlap <= 0:
                     continue
-                weight = note.velocity * overlap * weight_multiplier
-                pitch_class = note.pitch % 12
-                hist[pitch_class] += weight
+                
+                energy = note.velocity * overlap
+                weight = energy * weight_multiplier
+                pc = note.pitch % 12
+                hist[pc] += weight
                 note_count += 1
                 
-                # Update global lowest pitch
-                if note.pitch < global_min_pitch:
-                    global_min_pitch = note.pitch
-                    lowest_pitch_class = pitch_class
+                if is_bass_track:
+                    bass_hist[pc] += energy
+                    has_bass = True
 
         if hist.sum() == 0 or note_count < min_notes:
-            return None
+            return []
             
-        # Pre-compute diatonic set if key is available
         diatonic_pc = set()
         if key and key != "UNKNOWN":
             tonic_pc, mode = self._parse_key(key)
-            # Major Scale Intervals
             intervals = {0, 2, 4, 5, 7, 9, 11}
             if mode == "MINOR":
-                # Natural Minor + Raised 7th (Harmonic) + Raised 6th (Melodic)
                 intervals = {0, 2, 3, 5, 7, 8, 9, 10, 11}
             diatonic_pc = {(tonic_pc + i) % 12 for i in intervals}
 
-        best: Optional[ChordCandidate] = None
-        best_simple: Optional[ChordCandidate] = None
+        # Root anchor: Strongest bass note determines the target bass pitch class
+        target_bass_pc = -1
+        if has_bass and bass_hist.sum() > 0:
+            target_bass_pc = int(np.argmax(bass_hist))
+        elif hist.sum() > 0:
+            target_bass_pc = int(np.argmax(hist))
+
+        candidates: List[ChordCandidate] = []
+        
         for root in range(12):
             for quality, intervals in self.templates.items():
                 tpl = np.zeros(12)
@@ -253,43 +314,44 @@ class ChordProgressionExtractor:
                     tpl[(root + interval) % 12] = weight
                 score = self._cosine_similarity(hist, tpl)
                 
-                # Diatonic Bonus / Non-Diatonic Penalty
                 if diatonic_pc:
-                    # Check if root is diatonic
                     if root in diatonic_pc:
                         score += self.diatonic_bonus
                     else:
                         score -= self.nondiatonic_penalty
 
-                # Bass Root Bonus
-                if lowest_pitch_class != -1 and root == lowest_pitch_class:
-                    score += self.bass_root_bonus
+                # Smart Bass Authority
+                if target_bass_pc != -1:
+                    # Case A: Bass is Root (Strongest match)
+                    if target_bass_pc == root:
+                        score += self.bass_root_bonus
+                    
+                    # Case B: Bass is 3rd/5th (Inversion, partial bonus)
+                    else:
+                        # Major/Dominant 3rd
+                        if (quality in ["maj", "7", "maj7"]) and target_bass_pc == (root + 4) % 12:
+                            score += (self.bass_root_bonus * 0.25)
+                        # Minor 3rd
+                        elif (quality in ["min", "m7"]) and target_bass_pc == (root + 3) % 12:
+                            score += (self.bass_root_bonus * 0.25)
+                        # 5th
+                        elif target_bass_pc == (root + 7) % 12:
+                            score += (self.bass_root_bonus * 0.15)
 
-                # Minimal triad bias; sus handled via penalties below.
                 if quality in ["maj", "min"]:
-                    score += 0.02
+                    score += 0.1 # General triad preference
+                
                 if quality in ["sus2", "sus4"]:
                     score -= self.sus_penalty
-                    third_strength = max(
-                        hist[(root + 3) % 12],
-                        hist[(root + 4) % 12],
-                    )
+                    third_strength = max(hist[(root + 3) % 12], hist[(root + 4) % 12])
                     if hist.sum() > 0 and third_strength >= 0.2 * hist.sum():
                         score -= self.sus_third_penalty
-                # 7th, sus4 등은 점수가 확실히 높을 때만 선택됨
-                if quality in ["maj", "min"]:
-                    if best_simple is None or score > best_simple.score:
-                        best_simple = ChordCandidate(root, quality, score)
-                if best is None or score > best.score:
-                    best = ChordCandidate(root, quality, score)
-        if (
-            best
-            and best.quality in ["sus2", "sus4"]
-            and best_simple
-            and (best.score - best_simple.score) <= self.sus_tiebreak_margin
-        ):
-            best = ChordCandidate(best_simple.root_pc, best_simple.quality, best_simple.score)
-        return best
+                
+                if score > 0.05:
+                    candidates.append(ChordCandidate(root, quality, score))
+        
+        candidates.sort(key=lambda x: x.score, reverse=True)
+        return candidates[:top_k]
 
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0:
@@ -299,8 +361,6 @@ class ChordProgressionExtractor:
     # ---- Roman numeral Conversion (Strict) ----
     def _roman(self, chord: ChordCandidate, key: Optional[str]) -> str:
         root_pc = chord.root_pc
-        
-        # 1. Simplify Quality (Map to 8 core types)
         target_quality = self.quality_map.get(chord.quality, "maj")
         
         if not key or key == "UNKNOWN":
@@ -308,63 +368,35 @@ class ChordProgressionExtractor:
 
         tonic_pc, mode = self._parse_key(key)
         degree = (root_pc - tonic_pc) % 12
-
-        # 2. Get Base Roman (I, bII, etc.) with Casing
         numeral = self._degree_to_roman(degree, target_quality)
         
-        # 3. Apply Suffixes for Allowed Extensions
-        if target_quality == "maj7":
-            numeral += "maj7"
-        elif target_quality == "7":
-            numeral += "7"
-        elif target_quality == "m7":
-            numeral += "7"      # i + 7 = i7
-        elif target_quality == "sus4":
-            numeral += "sus4"
-        elif target_quality == "dim7":
-            numeral += "o7"     # viio7
-        elif target_quality == "m7b5":
-            numeral += "h7"     # iih7 (or iø7)
+        if target_quality == "maj7": numeral += "maj7"
+        elif target_quality == "7": numeral += "7"
+        elif target_quality == "m7": numeral += "7"
+        elif target_quality == "sus4": numeral += "sus4"
+        elif target_quality == "dim7": numeral += "o7"
+        elif target_quality == "m7b5": numeral += "h7"
 
         return numeral
 
     def _degree_to_roman(self, degree: int, quality: str) -> str:
-        # Fixed Chromatic Mapping (0-11)
         base_degrees = {
-            0: "I",
-            1: "bII",
-            2: "II",
-            3: "bIII",
-            4: "III",
-            5: "IV",
-            6: "bV",
-            7: "V",
-            8: "bVI",
-            9: "VI",
-            10: "bVII",
-            11: "VII",
+            0: "I", 1: "bII", 2: "II", 3: "bIII", 4: "III", 5: "IV",
+            6: "bV", 7: "V", 8: "bVI", 9: "VI", 10: "bVII", 11: "VII",
         }
-        
         roman = base_degrees.get(degree % 12, "?")
-
-        # Casing Rule: Minor/Diminished families -> Lowercase
         if quality in ["min", "dim", "dim7", "m7", "m7b5"]:
             roman = roman.lower()
-            
         return roman
 
     def _absolute_chord(self, root_pc: int, quality: str) -> str:
         names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         name = names[root_pc % 12]
-        
         suffix_map = {
-            "maj": "", "min": "m", 
-            "maj7": "maj7", "7": "7", "m7": "m7",
-            "sus4": "sus4", 
-            "dim7": "dim7", "m7b5": "m7b5"
+            "maj": "", "min": "m", "maj7": "maj7", "7": "7", "m7": "m7",
+            "sus4": "sus4", "dim7": "dim7", "m7b5": "m7b5"
         }
-        suffix = suffix_map.get(quality, "")
-        return name + suffix
+        return name + suffix_map.get(quality, "")
 
     def _parse_key(self, key: str) -> Tuple[int, str]:
         tonic, mode = key.split("_")

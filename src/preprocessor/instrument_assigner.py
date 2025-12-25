@@ -49,12 +49,10 @@ class InstrumentRoleAssigner:
         # Handle explicit types from metadata
         if inst_type == "PIANO_SOLO":
             # Force no drums, treat as band without drums
-            # This relies on pickers ignoring tracks with is_drum=True, 
-            # effectively muting any accidental drum tracks in a piano solo file.
             return self._assign_band_with_tracks(tracks, forced_drums=None)
 
         if inst_type == "ORCHESTRA":
-            return self._assign_orchestral(tracks), {}
+            return self._assign_orchestral(tracks)
 
         if inst_type == "BAND":
             return self._assign_band_with_tracks(tracks)
@@ -71,7 +69,7 @@ class InstrumentRoleAssigner:
 
         # 2. Orchestra (Large Ensemble without Drum Kit)
         if not has_drums and len(non_drum_tracks) >= 6:
-            return self._assign_orchestral(tracks), {}
+            return self._assign_orchestral(tracks)
 
         # 3. Pop/Band (Default)
         return self._assign_band_with_tracks(tracks)
@@ -108,31 +106,31 @@ class InstrumentRoleAssigner:
         }
         return roles, role_tracks
 
-    def _assign_orchestral(self, tracks: List[TrackStats]) -> Dict[str, str]:
-        # Map GM programs to Families
-        # Strings: 40-47 (Strings), 48-55 (Ensemble), 110 (Fiddle) -> 40-55, 110
-        # Brass: 56-63
-        # Woodwinds: 64-79 (Reed, Pipe)
-        # Percussion: 8-15 (Chromatic Perc), 112-119 (Tinkle, Agogo...), 120-127 (Synth FX? No), Standard Drums
-        # Keys/Others: Everything else
-        
+    def _assign_orchestral(self, tracks: List[TrackStats]) -> Tuple[Dict[str, str], Dict[str, List[int]]]:
+        # Families for orchestra result
         families = {
             "STRINGS": [],
             "BRASS": [],
             "WOODWINDS": [],
             "PERCUSSION": []
         }
+        
+        # Roles for chord extraction weighting
+        role_tracks = {
+            "MELODY": [],
+            "HARMONY": [],
+            "BASS": [],
+            "DRUMS": []
+        }
 
         for tr in tracks:
             prog = tr.instrument.program
             name = self._instrument_name(tr)
             
+            # --- Family Assignment ---
             if tr.instrument.is_drum:
                 families["PERCUSSION"].append(name)
-                continue
-            
-            # GM Mapping
-            if 40 <= prog <= 55 or prog == 110:
+            elif 40 <= prog <= 55 or prog == 110:
                 families["STRINGS"].append(name)
             elif 56 <= prog <= 63:
                 families["BRASS"].append(name)
@@ -141,41 +139,35 @@ class InstrumentRoleAssigner:
             elif 8 <= prog <= 15 or 112 <= prog <= 119:
                 families["PERCUSSION"].append(name)
             else:
-                # Fallback for others (Piano, Guitar, Synth) -> Assign to most likely role or ignore?
-                # For now, let's map Piano/Harp to Strings (common in orch) or Percussion?
-                # Actually, Piano (0-7) is often used as Percussion or Strings equivalent in function.
-                # Let's add a "KEYBOARD" or just map to Strings for Melody?
-                # User request specifically asked for STRINGS, BRASS, WOODWINDS, PERCUSSION.
-                # Let's map "Others" to the family they likely support or just pick the dominant one.
-                # For simplicity, we can ignore or map to closest. 
-                # Piano (0) -> Strings (often plays with strings).
-                if 0 <= prog <= 7:
-                    families["STRINGS"].append(name) # Piano treated as Strings/Keys layer
-                elif 24 <= prog <= 39: # Guitar/Bass
-                    families["STRINGS"].append(name) # Plucked strings
+                if 0 <= prog <= 7 or 24 <= prog <= 39:
+                    families["STRINGS"].append(name)
                 else:
-                    families["WOODWINDS"].append(name) # Synth/Ethnic -> Woodwinds buffer
+                    families["WOODWINDS"].append(name)
+            
+            # --- Role Assignment (Functional) ---
+            if tr.instrument.is_drum:
+                role_tracks["DRUMS"].append(tr.idx)
+            # Bass Role: explicit bass instruments OR low-register strings/others
+            elif (32 <= prog <= 39) or prog in [42, 43, 58, 68, 69, 70, 71] or (tr.mean_pitch is not None and tr.mean_pitch < 48 and (48 <= prog <= 51 or 0 <= prog <= 7)):
+                role_tracks["BASS"].append(tr.idx)
+            # Melody Role: High Strings, Flutes, Trumpets, Oboes, etc.
+            elif (40 <= prog <= 41) or (56 <= prog <= 61) or (64 <= prog <= 75) or (tr.mean_pitch is not None and tr.mean_pitch > 60):
+                role_tracks["MELODY"].append(tr.idx)
+            else:
+                role_tracks["HARMONY"].append(tr.idx)
 
-        # Select representative for each family (e.g. most notes or highest polyphony)
-        result = {}
+        # Build family result (most common name in each family)
+        from collections import Counter
+        result_families = {}
         for fam, candidates in families.items():
             if not candidates:
-                result[fam] = "NONE"
+                result_families[fam] = "NONE"
             else:
-                # Simple heuristic: Just pick the first unique one, or join them?
-                # "STRINGS=VIOLIN" is better than "STRINGS=VIOLIN,CELLO" for token consistency?
-                # Let's pick the most frequent one?
-                # Since we stored names, we lost the stats. 
-                # Ideally we should select based on stats.
-                # But for now, returning the most common name in that family from the track list is OK.
-                # Let's just return the primary one (first found or most frequent).
-                # To be deterministic, sort and pick first?
-                # Or count frequency.
-                from collections import Counter
                 most_common = Counter(candidates).most_common(1)[0][0]
-                result[fam] = most_common
+                result_families[fam] = most_common
         
-        return result
+        return result_families, role_tracks
+
 
     # ---- Track stats ----
     def _collect_tracks(self, midi: pretty_midi.PrettyMIDI) -> List[TrackStats]:
@@ -282,7 +274,7 @@ class InstrumentRoleAssigner:
             candidates.append((score, tr))
         if not candidates:
             return None
-        candidates.sort(key=lambda x: x[0])
+        candidates.sort(key=lambda x: x[0], reverse=True)
         return candidates[0][1]
 
     def _pick_harmony(
