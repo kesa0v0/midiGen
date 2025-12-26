@@ -10,7 +10,8 @@ class TimeSignature:
 
 @dataclass
 class Section:
-    id: str
+    instance_id: str
+    type_id: str
     start_bar: int
     end_bar: int
     local_bpm: Optional[int] = None

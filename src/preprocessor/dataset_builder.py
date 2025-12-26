@@ -41,13 +41,13 @@ class DatasetBuilder:
         sections = StructureExtractor().extract_sections(midi, analysis)
         key_result = KeyDetector().detect(
             midi_path,
-            [(sec.id, sec.start_bar, sec.end_bar) for sec in sections],
+            [(sec.instance_id, sec.start_bar, sec.end_bar) for sec in sections],
             debug=debug_key,
             midi=midi,
         )
         analysis["global_key"] = key_result.global_key
         for sec in sections:
-            key_val = key_result.section_keys.get(sec.id)
+            key_val = key_result.section_keys.get(sec.instance_id)
             sec.local_key = None if key_val in (None, "KEEP") else key_val
 
         instruments, role_tracks = InstrumentRoleAssigner().assign_with_tracks(midi, inst_type=inst_type)

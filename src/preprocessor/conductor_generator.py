@@ -1,10 +1,10 @@
-import numpy as np
+﻿import numpy as np
 
 from models import ConductorSection, TimeSignature
 
 
 class ConductorTokenGenerator:
-    def __init__(self, default_grid_unit: str = "1/8"):
+    def __init__(self, default_grid_unit: str = "1/4"):
         self.default_grid_unit = default_grid_unit
 
     def generate(
@@ -20,8 +20,9 @@ class ConductorTokenGenerator:
         """
         global_bpm, global_ts = self._global_defaults(analysis)
         global_key = analysis.get("global_key", None)
-        # grid_unit을 무조건 1/4로 고정 (분석 결과 무시)
-        grid_unit = "1/4"
+        # grid_unit??臾댁“嫄?1/4濡?怨좎젙 (遺꾩꽍 寃곌낵 臾댁떆)
+        grid_unit = self._grid_unit(analysis, global_ts)
+        chord_grid_unit = self._chord_grid_unit(analysis, global_ts)
         midi_type = analysis.get("midi_type")
         ticks_per_beat = analysis.get("ticks_per_beat")
         channel_programs = analysis.get("channel_programs")
@@ -33,13 +34,13 @@ class ConductorTokenGenerator:
             local_ts = sec.local_time_sig or TimeSignature(*global_ts)
             local_key = sec.local_key or global_key
 
-            slots_per_bar = self._slots_per_bar(local_ts, grid_unit)
+            slots_per_bar = self._slots_per_bar(local_ts, chord_grid_unit)
             prog = prog_extractor.extract(midi, sec, analysis, slots_per_bar)
             ctrl = ctrl_extractor.extract(midi, sec, analysis)
 
             conductor_sections.append(
                 ConductorSection(
-                    name=sec.id,
+                    name=sec.instance_id,
                     bars=sec.end_bar - sec.start_bar,
                     bpm=local_bpm,
                     time_sig=local_ts,
@@ -59,6 +60,7 @@ class ConductorTokenGenerator:
                 "time_sig": global_ts,
                 "key": global_key,
                 "grid_unit": grid_unit,
+                "chord_grid_unit": chord_grid_unit,
                 "midi_type": midi_type,
                 "ticks_per_beat": ticks_per_beat,
                 "channel_programs": channel_programs,
@@ -82,8 +84,18 @@ class ConductorTokenGenerator:
             return "1/8"
         return self.default_grid_unit
 
+    def _chord_grid_unit(self, analysis, global_ts):
+        if "chord_grid_unit" in analysis:
+            return analysis["chord_grid_unit"]
+        if "harmonic_grid_unit" in analysis:
+            return analysis["harmonic_grid_unit"]
+        _, den = global_ts
+        if den >= 8:
+            return "1/8"
+        return "1/4"
+
     def _build_form(self, sections):
-        return [f"{s.id}({s.end_bar - s.start_bar})" for s in sections]
+        return [f"{s.instance_id}({s.end_bar - s.start_bar})" for s in sections]
 
     def _slots_per_bar(self, time_sig: TimeSignature, grid_unit: str) -> int:
         num = time_sig.numerator
@@ -97,46 +109,40 @@ class ConductorTokenGenerator:
         return max(1, slots)
 
     def _apply_hooks(self, conductor_sections, sections, analysis, form):
-        # HOOK/REPEAT 판정 개선: MAIN_THEME는 무조건 HOOK, 반복 코드 진행은 IDENTICAL
+        # HOOK/REPEAT ?먯젙 媛쒖꽑: MAIN_THEME??臾댁“嫄?HOOK, 諛섎났 肄붾뱶 吏꾪뻾? IDENTICAL
         prog_hashes = {}
         for idx, (csec, sec) in enumerate(zip(conductor_sections, sections)):
             # Use role metadata instead of ID string
             is_main_theme = (sec.role == "MAIN_THEME")
             
-            # prog_grid를 해시로 변환 (tuple로 변환 후 hash)
+            # prog_grid瑜??댁떆濡?蹂??(tuple濡?蹂????hash)
             prog_tuple = tuple(tuple(row) for row in csec.prog_grid)
             
-            # MAIN_THEME는 기본적으로 IDENTICAL (Chorus logic replacement)
+            # MAIN_THEME??湲곕낯?곸쑝濡?IDENTICAL (Chorus logic replacement)
             if is_main_theme:
                 repeat_type = "IDENTICAL"
             else:
                 repeat_type = "VARIATION"
             
             hook = "NO"
-            # 반복 탐색: 동일 ID의 이전 섹션과 코드 진행이 완전히 같으면 IDENTICAL
-            base_id = sec.id # No longer need split('_') as IDs are SECTION_A etc without numeric suffixes in new logic? 
-            # Actually structure_extractor labels are just SECTION_A, SECTION_B (unique types).
-            # But duplicate appearances get the SAME ID. 
-            # structure_extractor labels: returns just "SECTION_A" etc.
-            # So if type repeats, ID is same.
-            
+            # 諛섎났 ?먯깋: ?숈씪 ID???댁쟾 ?뱀뀡怨?肄붾뱶 吏꾪뻾???꾩쟾??媛숈쑝硫?IDENTICAL
             found_identical = False
             is_first_occurrence = True
             
             for prev_idx in range(idx):
                 prev_sec = sections[prev_idx]
-                if sec.id == prev_sec.id:
+                if sec.type_id == prev_sec.type_id:
                     is_first_occurrence = False
                     prev_prog_tuple = tuple(tuple(row) for row in conductor_sections[prev_idx].prog_grid)
                     if prog_tuple == prev_prog_tuple:
                         repeat_type = "IDENTICAL"
                         found_identical = True
                         break
-                    # MAIN_THEME 반복 출현이지만 코드가 다르면 VARIATION
+                    # MAIN_THEME 諛섎났 異쒗쁽?댁?留?肄붾뱶媛 ?ㅻⅤ硫?VARIATION
                     if is_main_theme:
                         repeat_type = "VARIATION"
             
-            # HOOK 판정: MAIN_THEME는 무조건 YES, 반복(IDENTICAL)이면 YES
+            # HOOK ?먯젙: MAIN_THEME??臾댁“嫄?YES, 諛섎났(IDENTICAL)?대㈃ YES
             if is_main_theme or repeat_type == "IDENTICAL":
                 hook = "YES"
             else:
@@ -145,7 +151,7 @@ class ConductorTokenGenerator:
             csec.hook = hook
             csec.hook_repeat = repeat_type
             
-            # HOOK_ROLE 설정
+            # HOOK_ROLE ?ㅼ젙
             if hook == "YES":
                 csec.hook_role = "MELODY"
             elif idx == 0: 
@@ -163,7 +169,7 @@ class ConductorTokenGenerator:
     def _hook_presence(self, idx: int, sections, bar_slice, base_counts) -> bool:
         cond = 0
         sec = sections[idx]
-        base = self._base_label(sec.id)
+        base = self._base_label(sec.type_id)
         if base_counts.get(base, 0) > 1:
             cond += 1
         if sec.end_bar - sec.start_bar >= 8:
@@ -199,7 +205,7 @@ class ConductorTokenGenerator:
         unique = len(set(int(c // 1) for c in cents))
         return unique <= len(cents) * 0.6
 
-    # _hook_repeat는 더 이상 사용하지 않음 (로직 통합)
+    # _hook_repeat?????댁긽 ?ъ슜?섏? ?딆쓬 (濡쒖쭅 ?듯빀)
     # def _hook_repeat(self, csec, all_secs, base_counts) -> str:
     #     pass
 
@@ -214,3 +220,4 @@ class ConductorTokenGenerator:
         if feel == "SWING":
             return "SYNCOPATED"
         return "STRAIGHT"
+

@@ -105,8 +105,12 @@ class PostValidator:
             return False
 
         grid_unit = global_block.get("grid_unit")
-        if grid_unit not in {"1/4", "1/8", "1/16"}:
+        if grid_unit not in {"1/2", "1/4", "1/8", "1/16"}:
             print(f"[PostValidator] invalid grid_unit {grid_unit}")
+            return False
+        chord_grid_unit = global_block.get("chord_grid_unit")
+        if chord_grid_unit is not None and chord_grid_unit not in {"1/2", "1/4", "1/8", "1/16"}:
+            print(f"[PostValidator] invalid chord_grid_unit {chord_grid_unit}")
             return False
 
         # MIDI metadata presence

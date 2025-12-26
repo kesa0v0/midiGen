@@ -37,7 +37,8 @@ class StructureExtractor:
         if not bars:
             return [
                 Section(
-                    id="SECTION_A",
+                    instance_id="SECTION_A_00",
+                    type_id="SECTION_A",
                     start_bar=0,
                     end_bar=0,
                 )
@@ -96,11 +97,18 @@ class StructureExtractor:
         labeled_info = self._label_sections(bars, spans)
 
         sections: List[Section] = []
+        label_counts = {}
+
         for idx, (start, end) in enumerate(spans):
             if start >= end:
                 continue
             
             label, role = labeled_info[idx]
+
+            count = label_counts.get(label, 0)
+            label_counts[label] = count + 1
+            # 0-based index suffix: SECTION_A_00, SECTION_A_01...
+            instance_id = f"{label}_{count:02d}"
 
             first_bar = bars[start]
             local_ts = self._consistent_time_sig(bars[start:end])
@@ -109,7 +117,8 @@ class StructureExtractor:
 
             sections.append(
                 Section(
-                    id=label,
+                    instance_id=instance_id,
+                    type_id=label,
                     start_bar=start,
                     end_bar=end,
                     local_bpm=local_bpm,

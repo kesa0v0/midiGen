@@ -35,6 +35,8 @@ class DatasetExporter:
         lines.append(f"BPM={global_meta['bpm']}")
         lines.append(f"TIME_SIG={global_meta['time_sig'][0]}/{global_meta['time_sig'][1]}")
         lines.append(f"GRID_UNIT={global_meta['grid_unit']}")
+        if global_meta.get("chord_grid_unit"):
+            lines.append(f"CHORD_GRID_UNIT={global_meta['chord_grid_unit']}")
         if global_meta.get("key"):
             lines.append(f"KEY={global_meta['key']}")
         lines.append(f"GENRE={genre}")

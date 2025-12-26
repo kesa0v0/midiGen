@@ -12,7 +12,7 @@ from music21 import converter, stream, key as m21key, pitch as m21pitch
 @dataclass(frozen=True)
 class KeyResult:
     global_key: str  # e.g., "C_MAJOR" or "UNKNOWN"
-    section_keys: Dict[str, str]  # section_id -> "KEEP" or "F#_MINOR"
+    section_keys: Dict[str, str]  # instance_id -> "KEEP" or "F#_MINOR"
 
 
 class KeyStringNormalizer:
@@ -72,7 +72,7 @@ class KeyDetector:
         resolve_diatonic: bool = True,
     ) -> KeyResult:
         """
-        sections: list of (section_id, start_bar_inclusive, end_bar_exclusive)
+        sections: list of (instance_id, start_bar_inclusive, end_bar_exclusive)
         bar index는 0-based, end_bar는 exclusive로 가정.
         """
         score = converter.parse(midi_path)

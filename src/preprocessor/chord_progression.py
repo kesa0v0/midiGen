@@ -23,7 +23,7 @@ class ChordProgressionExtractor:
     - Detection: High resolution (includes aug, dim7, etc.)
     - Output: Compressed to 8 core tokens (Strategic Vocabulary)
     - Mapping: Strict Chromatic Scale Degree (No functional interpretation)
-    - Resolution: Beat-level (1 chord per beat) to prevent hyperactivity
+    - Resolution: Slot-level with hold tokens for grid-stable counts
     - Smoothing: Viterbi algorithm for context-aware chord selection
     - Root Anchor: Statistical reliance on strongest BASS track note for root detection
     - Inversion Aware: Supports recognition of 3rd/5th in bass
@@ -91,7 +91,7 @@ class ChordProgressionExtractor:
 
         # 2. Strategic Vocabulary Mapping (Compression)
         self.quality_map = {
-            "maj": "maj", "aug": "maj", "sus2": "maj",
+            "maj": "maj", "aug": "maj", "sus2": "sus2",
             "min": "min",
             "7": "7", "m7": "m7", "maj7": "maj7",
             "sus4": "sus4",
@@ -116,17 +116,16 @@ class ChordProgressionExtractor:
         melody_track_ids = set(role_tracks.get("MELODY") or [])
         harmony_track_ids = set(role_tracks.get("HARMONY") or [])
 
-        # --- Step 1: Collect candidates for all beats ---
-        all_beats: List[Tuple[int, int, List[ChordCandidate]]] = []
+        # --- Step 1: Collect candidates for all slots ---
+        all_slots: List[Tuple[int, int, List[ChordCandidate]]] = []
         
         for bar_idx, bar in enumerate(section_bars):
-            num, den = bar.get("time_sig", (4, 4))
-            beats = max(1, int(num))
-            beat_dur = (bar["end"] - bar["start"]) / beats
+            bar_dur = bar["end"] - bar["start"]
+            slot_dur = bar_dur / slots_per_bar if slots_per_bar > 0 else 0.0
 
-            for b in range(beats):
-                s_time = bar["start"] + b * beat_dur
-                e_time = s_time + beat_dur
+            for s in range(slots_per_bar):
+                s_time = bar["start"] + s * slot_dur
+                e_time = s_time + slot_dur
 
                 candidates = self._chords_for_window(
                     midi,
@@ -143,22 +142,22 @@ class ChordProgressionExtractor:
                 if not candidates:
                     candidates = [ChordCandidate(root_pc=0, quality="N.C.", score=0.0)]
                 
-                all_beats.append((bar_idx, b, candidates))
+                all_slots.append((bar_idx, s, candidates))
 
-        if not all_beats:
+        if not all_slots:
             return []
 
         # --- Step 2: Viterbi Algorithm ---
-        T = len(all_beats)
-        dp = [np.zeros(len(cands)) for _, _, cands in all_beats]
-        backpointer = [[0] * len(cands) for _, _, cands in all_beats]
+        T = len(all_slots)
+        dp = [np.zeros(len(cands)) for _, _, cands in all_slots]
+        backpointer = [[0] * len(cands) for _, _, cands in all_slots]
         
-        for i, cand in enumerate(all_beats[0][2]):
+        for i, cand in enumerate(all_slots[0][2]):
             dp[0][i] = cand.score
 
         for t in range(1, T):
-            prev_cands = all_beats[t-1][2]
-            curr_cands = all_beats[t][2]
+            prev_cands = all_slots[t - 1][2]
+            curr_cands = all_slots[t][2]
             
             for j, curr_cand in enumerate(curr_cands):
                 max_score = -float('inf')
@@ -182,37 +181,46 @@ class ChordProgressionExtractor:
         for t in range(T-1, 0, -1):
             best_path_indices[t-1] = backpointer[t][best_path_indices[t]]
 
-        # --- Step 3: Format Output ---
+        # --- Step 3: Format Output (event + hold) ---
+        slot_tokens: List[str] = []
+        for idx in range(T):
+            cand_idx = best_path_indices[idx]
+            chord = all_slots[idx][2][cand_idx]
+
+            if chord.quality == "N.C.":
+                token = "N.C."
+            elif absolute_chords:
+                target_quality = self.quality_map.get(chord.quality, "maj")
+                token = self._absolute_chord(chord.root_pc, target_quality)
+            else:
+                token = self._roman(chord, roman_key)
+            slot_tokens.append(token)
+
+        slot_tokens = self._merge_single_slot_changes(slot_tokens)
+        slot_tokens = self._replace_short_nc(slot_tokens, max_len=1)
+
         prog_grid: List[List[str]] = []
-        beat_idx = 0
-        
-        for bar in section_bars:
+        slot_idx = 0
+        for _ in section_bars:
             bar_tokens: List[str] = []
-            num, den = bar.get("time_sig", (4, 4))
-            beats = max(1, int(num))
-            slots_per_beat = max(1, slots_per_bar // beats)
-
-            for b in range(beats):
-                cand_idx = best_path_indices[beat_idx]
-                chord = all_beats[beat_idx][2][cand_idx]
-                beat_idx += 1
-                
-                if chord.quality == "N.C.":
+            prev_token = None
+            for s in range(slots_per_bar):
+                if slot_idx >= len(slot_tokens):
                     token = "N.C."
-                elif absolute_chords:
-                    target_quality = self.quality_map.get(chord.quality, "maj")
-                    token = self._absolute_chord(chord.root_pc, target_quality)
                 else:
-                    token = self._roman(chord, roman_key)
+                    token = slot_tokens[slot_idx]
+                slot_idx += 1
 
-                bar_tokens.append(token)
-                for _ in range(slots_per_beat - 1):
+                if s == 0:
+                    bar_tokens.append(token)
+                    prev_token = token
+                    continue
+
+                if token == prev_token:
                     bar_tokens.append("-")
-
-            if len(bar_tokens) < slots_per_bar:
-                bar_tokens.extend(["-"] * (slots_per_bar - len(bar_tokens)))
-            elif len(bar_tokens) > slots_per_bar:
-                bar_tokens = bar_tokens[:slots_per_bar]
+                else:
+                    bar_tokens.append(token)
+                    prev_token = token
 
             prog_grid.append(bar_tokens)
 
@@ -235,6 +243,38 @@ class ChordProgressionExtractor:
             if interval != 1: score -= 0.1
 
         return score
+
+    def _merge_single_slot_changes(self, tokens: List[str]) -> List[str]:
+        if len(tokens) < 3:
+            return tokens
+        merged = list(tokens)
+        for i in range(1, len(merged) - 1):
+            if merged[i] != merged[i - 1] and merged[i - 1] == merged[i + 1]:
+                merged[i] = merged[i - 1]
+        return merged
+
+    def _replace_short_nc(self, tokens: List[str], max_len: int = 1) -> List[str]:
+        if not tokens:
+            return tokens
+        replaced = list(tokens)
+        i = 0
+        while i < len(replaced):
+            if replaced[i] != "N.C.":
+                i += 1
+                continue
+            j = i + 1
+            while j < len(replaced) and replaced[j] == "N.C.":
+                j += 1
+            run_len = j - i
+            if run_len <= max_len:
+                prev_tok = replaced[i - 1] if i > 0 else None
+                next_tok = replaced[j] if j < len(replaced) else None
+                fill = prev_tok if prev_tok and prev_tok != "N.C." else next_tok
+                if fill and fill != "N.C.":
+                    for k in range(i, j):
+                        replaced[k] = fill
+            i = j
+        return replaced
 
     # ---- Chord detection ----
     def _chords_for_window(
@@ -373,6 +413,7 @@ class ChordProgressionExtractor:
         if target_quality == "maj7": numeral += "maj7"
         elif target_quality == "7": numeral += "7"
         elif target_quality == "m7": numeral += "7"
+        elif target_quality == "sus2": numeral += "sus2"
         elif target_quality == "sus4": numeral += "sus4"
         elif target_quality == "dim7": numeral += "o7"
         elif target_quality == "m7b5": numeral += "h7"
@@ -394,7 +435,7 @@ class ChordProgressionExtractor:
         name = names[root_pc % 12]
         suffix_map = {
             "maj": "", "min": "m", "maj7": "maj7", "7": "7", "m7": "m7",
-            "sus4": "sus4", "dim7": "dim7", "m7b5": "m7b5"
+            "sus2": "sus2", "sus4": "sus4", "dim7": "dim7", "m7b5": "m7b5"
         }
         return name + suffix_map.get(quality, "")
 
