@@ -16,6 +16,16 @@ class ChordCandidate:
     score: float
 
 
+@dataclass
+class SlotInfo:
+    bar_idx: int
+    slot_idx: int
+    candidates: List[ChordCandidate]
+    bass_pc: Optional[int]
+    bass_strength: float
+    note_count: int
+
+
 class ChordProgressionExtractor:
 
     """
@@ -45,10 +55,18 @@ class ChordProgressionExtractor:
         sus_tiebreak_margin: float = 0.1,
         diatonic_bonus: float = 0.12,
         nondiatonic_penalty: float = 0.08,
-        melody_penalty: float = 0.2,
+        diatonic_chord_penalty: float = 0.04,
+        min_diatonic_chord_ratio: float = 0.5,
+        melody_penalty: float = 0,
         harmony_boost: float = 2.5,
         bass_root_bonus: float = 2.0,
         triad_bonus: float = 0.05,
+        same_chord_bonus: float = 0.25,
+        change_penalty: float = 0.05,
+        bass_hold_bonus: float = 0.3,
+        bass_change_bonus: float = 0.05,
+        use_role_tracks_only: bool = True,
+        ignore_melody: bool = True,
     ):
         self.grid_unit = grid_unit
         self.min_notes = min_notes
@@ -60,10 +78,18 @@ class ChordProgressionExtractor:
         self.sus_tiebreak_margin = max(0.0, float(sus_tiebreak_margin))
         self.diatonic_bonus = max(0.0, float(diatonic_bonus))
         self.nondiatonic_penalty = max(0.0, float(nondiatonic_penalty))
+        self.diatonic_chord_penalty = max(0.0, float(diatonic_chord_penalty))
+        self.min_diatonic_chord_ratio = max(0.0, float(min_diatonic_chord_ratio))
         self.melody_penalty = melody_penalty
         self.harmony_boost = harmony_boost
         self.bass_root_bonus = bass_root_bonus
         self.triad_bonus = triad_bonus
+        self.same_chord_bonus = max(0.0, float(same_chord_bonus))
+        self.change_penalty = max(0.0, float(change_penalty))
+        self.bass_hold_bonus = max(0.0, float(bass_hold_bonus))
+        self.bass_change_bonus = max(0.0, float(bass_change_bonus))
+        self.use_role_tracks_only = bool(use_role_tracks_only)
+        self.ignore_melody = bool(ignore_melody)
 
         # 1. Detection Templates (Balanced for general musicality)
         self.templates = {
@@ -117,7 +143,7 @@ class ChordProgressionExtractor:
         harmony_track_ids = set(role_tracks.get("HARMONY") or [])
 
         # --- Step 1: Collect candidates for all slots ---
-        all_slots: List[Tuple[int, int, List[ChordCandidate]]] = []
+        all_slots: List[SlotInfo] = []
         
         for bar_idx, bar in enumerate(section_bars):
             bar_dur = bar["end"] - bar["start"]
@@ -127,7 +153,7 @@ class ChordProgressionExtractor:
                 s_time = bar["start"] + s * slot_dur
                 e_time = s_time + slot_dur
 
-                candidates = self._chords_for_window(
+                candidates, bass_pc, bass_strength, note_count = self._chords_for_window(
                     midi,
                     s_time,
                     e_time,
@@ -142,29 +168,40 @@ class ChordProgressionExtractor:
                 if not candidates:
                     candidates = [ChordCandidate(root_pc=0, quality="N.C.", score=0.0)]
                 
-                all_slots.append((bar_idx, s, candidates))
+                all_slots.append(
+                    SlotInfo(
+                        bar_idx=bar_idx,
+                        slot_idx=s,
+                        candidates=candidates,
+                        bass_pc=bass_pc,
+                        bass_strength=bass_strength,
+                        note_count=note_count,
+                    )
+                )
 
         if not all_slots:
             return []
 
         # --- Step 2: Viterbi Algorithm ---
         T = len(all_slots)
-        dp = [np.zeros(len(cands)) for _, _, cands in all_slots]
-        backpointer = [[0] * len(cands) for _, _, cands in all_slots]
+        dp = [np.zeros(len(slot.candidates)) for slot in all_slots]
+        backpointer = [[0] * len(slot.candidates) for slot in all_slots]
         
-        for i, cand in enumerate(all_slots[0][2]):
+        for i, cand in enumerate(all_slots[0].candidates):
             dp[0][i] = cand.score
 
         for t in range(1, T):
-            prev_cands = all_slots[t - 1][2]
-            curr_cands = all_slots[t][2]
+            prev_slot = all_slots[t - 1]
+            curr_slot = all_slots[t]
+            prev_cands = prev_slot.candidates
+            curr_cands = curr_slot.candidates
             
             for j, curr_cand in enumerate(curr_cands):
                 max_score = -float('inf')
                 best_prev_idx = 0
                 
                 for i, prev_cand in enumerate(prev_cands):
-                    transition = self._get_transition_score(prev_cand, curr_cand)
+                    transition = self._get_transition_score(prev_cand, curr_cand, prev_slot, curr_slot)
                     score = dp[t-1][i] + transition + curr_cand.score
                     
                     if score > max_score:
@@ -185,7 +222,7 @@ class ChordProgressionExtractor:
         slot_tokens: List[str] = []
         for idx in range(T):
             cand_idx = best_path_indices[idx]
-            chord = all_slots[idx][2][cand_idx]
+            chord = all_slots[idx].candidates[cand_idx]
 
             if chord.quality == "N.C.":
                 token = "N.C."
@@ -226,7 +263,13 @@ class ChordProgressionExtractor:
 
         return prog_grid
 
-    def _get_transition_score(self, prev: ChordCandidate, curr: ChordCandidate) -> float:
+    def _get_transition_score(
+        self,
+        prev: ChordCandidate,
+        curr: ChordCandidate,
+        prev_slot: SlotInfo,
+        curr_slot: SlotInfo,
+    ) -> float:
         if prev.quality == "N.C." or curr.quality == "N.C.":
             return 0.0
             
@@ -241,6 +284,27 @@ class ChordProgressionExtractor:
             
         if "dim" in prev.quality and "maj" in curr.quality:
             if interval != 1: score -= 0.1
+
+        same_chord = (prev.root_pc == curr.root_pc and prev.quality == curr.quality)
+        if same_chord:
+            score += self.same_chord_bonus
+        else:
+            score -= self.change_penalty
+
+        bass_hold = (
+            prev_slot.bass_pc is not None
+            and curr_slot.bass_pc is not None
+            and prev_slot.bass_pc == curr_slot.bass_pc
+        )
+        bass_change = (
+            prev_slot.bass_pc is not None
+            and curr_slot.bass_pc is not None
+            and prev_slot.bass_pc != curr_slot.bass_pc
+        )
+        if bass_hold:
+            score += self.bass_hold_bonus if same_chord else -self.bass_hold_bonus
+        elif bass_change:
+            score += self.bass_change_bonus if not same_chord else -self.bass_change_bonus
 
         return score
 
@@ -288,12 +352,17 @@ class ChordProgressionExtractor:
         harmony_track_ids: Optional[Set[int]] = None,
         key: Optional[str] = None,
         top_k: int = 4
-    ) -> List[ChordCandidate]:
+    ) -> Tuple[List[ChordCandidate], Optional[int], float, int]:
         
         hist = np.zeros(12, dtype=float)
         bass_hist = np.zeros(12, dtype=float)
         has_bass = False
         note_count = 0
+        bass_strength = 0.0
+        use_role_only = self.use_role_tracks_only and (
+            (bass_track_ids and len(bass_track_ids) > 0)
+            or (harmony_track_ids and len(harmony_track_ids) > 0)
+        )
         
         for inst_idx, inst in enumerate(midi.instruments):
             if inst.is_drum:
@@ -305,10 +374,17 @@ class ChordProgressionExtractor:
             if bass_track_ids and inst_idx in bass_track_ids:
                 weight_multiplier = self.bass_role_weight
                 is_bass_track = True
-            elif melody_track_ids and inst_idx in melody_track_ids:
-                weight_multiplier = self.melody_penalty
             elif harmony_track_ids and inst_idx in harmony_track_ids:
                 weight_multiplier = self.harmony_boost
+            elif melody_track_ids and inst_idx in melody_track_ids:
+                if self.ignore_melody:
+                    continue
+                weight_multiplier = self.melody_penalty
+            elif use_role_only:
+                continue
+
+            if weight_multiplier <= 0:
+                continue
 
             for note in inst.notes:
                 if note.start >= end or note.end <= start:
@@ -327,8 +403,9 @@ class ChordProgressionExtractor:
                     bass_hist[pc] += energy
                     has_bass = True
 
+        bass_strength = float(bass_hist.sum())
         if hist.sum() == 0 or note_count < min_notes:
-            return []
+            return [], None, bass_strength, note_count
             
         diatonic_pc = set()
         if key and key != "UNKNOWN":
@@ -344,6 +421,7 @@ class ChordProgressionExtractor:
             target_bass_pc = int(np.argmax(bass_hist))
         elif hist.sum() > 0:
             target_bass_pc = int(np.argmax(hist))
+        slot_bass_pc = int(np.argmax(bass_hist)) if has_bass and bass_hist.sum() > 0 else None
 
         candidates: List[ChordCandidate] = []
         
@@ -359,6 +437,14 @@ class ChordProgressionExtractor:
                         score += self.diatonic_bonus
                     else:
                         score -= self.nondiatonic_penalty
+                    chord_pcs = [(root + interval) % 12 for interval in intervals.keys()]
+                    if chord_pcs:
+                        nondiatonic = sum(1 for pc in chord_pcs if pc not in diatonic_pc)
+                        if nondiatonic:
+                            score -= self.diatonic_chord_penalty * nondiatonic
+                            ratio = (len(chord_pcs) - nondiatonic) / len(chord_pcs)
+                            if ratio < self.min_diatonic_chord_ratio:
+                                score -= self.diatonic_chord_penalty
 
                 # Smart Bass Authority
                 if target_bass_pc != -1:
@@ -391,7 +477,7 @@ class ChordProgressionExtractor:
                     candidates.append(ChordCandidate(root, quality, score))
         
         candidates.sort(key=lambda x: x.score, reverse=True)
-        return candidates[:top_k]
+        return candidates[:top_k], slot_bass_pc, bass_strength, note_count
 
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0:

@@ -51,6 +51,7 @@ class ConductorTokenGenerator:
                 )
             )
 
+        self._align_repeated_sections(conductor_sections, sections)
         form = self._build_form(sections)
         self._apply_hooks(conductor_sections, sections, analysis, form)
 
@@ -162,6 +163,78 @@ class ConductorTokenGenerator:
             
             csec.hook_range = self._hook_range(csec)
             csec.hook_rhythm = self._hook_rhythm(csec)
+
+    def _align_repeated_sections(self, conductor_sections, sections, similarity_threshold: float = 0.75):
+        groups = {}
+        for idx, sec in enumerate(sections):
+            groups.setdefault(sec.type_id, []).append(idx)
+
+        for indices in groups.values():
+            if len(indices) < 2:
+                continue
+            entries = []
+            for idx in indices:
+                csec = conductor_sections[idx]
+                expanded = self._expand_prog_grid(csec.prog_grid)
+                if not expanded:
+                    continue
+                entries.append((idx, expanded, csec))
+            if len(entries) < 2:
+                continue
+
+            length_groups = {}
+            for idx, expanded, csec in entries:
+                length_groups.setdefault(len(expanded), []).append((idx, expanded, csec))
+
+            for same_len in length_groups.values():
+                if len(same_len) < 2:
+                    continue
+
+                sig_counts = {}
+                for idx, expanded, csec in same_len:
+                    sig = tuple(expanded)
+                    sig_counts.setdefault(sig, []).append((idx, expanded, csec))
+
+                best_sig, best_entries = max(sig_counts.items(), key=lambda item: len(item[1]))
+                if len(best_entries) == 1:
+                    best_idx, _, base_csec = max(
+                        same_len, key=lambda item: self._prog_confidence(item[1])
+                    )
+                    best_sig = tuple(self._expand_prog_grid(base_csec.prog_grid))
+                else:
+                    best_idx = best_entries[0][0]
+                    base_csec = conductor_sections[best_idx]
+
+                for idx, expanded, csec in same_len:
+                    if idx == best_idx:
+                        continue
+                    similarity = self._token_similarity(best_sig, expanded)
+                    if similarity >= similarity_threshold:
+                        csec.prog_grid = [list(row) for row in base_csec.prog_grid]
+
+    def _expand_prog_grid(self, prog_grid):
+        expanded = []
+        prev = None
+        for bar in prog_grid:
+            for tok in bar:
+                if tok == "-" and prev is not None:
+                    expanded.append(prev)
+                else:
+                    expanded.append(tok)
+                    prev = tok
+        return expanded
+
+    def _token_similarity(self, tokens_a, tokens_b) -> float:
+        if not tokens_a or not tokens_b or len(tokens_a) != len(tokens_b):
+            return 0.0
+        matches = sum(1 for a, b in zip(tokens_a, tokens_b) if a == b)
+        return matches / len(tokens_a)
+
+    def _prog_confidence(self, tokens) -> float:
+        if not tokens:
+            return 0.0
+        non_nc = sum(1 for t in tokens if t != "N.C.")
+        return non_nc / len(tokens)
 
     def _base_label(self, name: str) -> str:
         return name.split("_")[0] if "_" in name else name
