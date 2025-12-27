@@ -1,3 +1,5 @@
+from typing import Optional
+
 from chord_progression import ChordProgressionExtractor
 from conductor_generator import ConductorTokenGenerator
 from control_tokens import ControlTokenExtractor
@@ -21,6 +23,10 @@ class DatasetBuilder:
         inst_type: str = "UNKNOWN",
         debug_key: bool = False,
         abs_chords: bool = False,
+        adaptive_chord_grid: Optional[bool] = None,
+        chord_detect_grid_unit: Optional[str] = None,
+        chord_grid_unit: Optional[str] = None,
+        chord_detail_mode: Optional[str] = None,
     ):
         midi_data = MidiLoader().load(midi_path)
         if midi_data is None:
@@ -37,6 +43,14 @@ class DatasetBuilder:
         analysis["channel_programs"] = midi_data.channel_programs
         analysis["source_path"] = midi_path
         analysis["absolute_chords"] = abs_chords
+        if adaptive_chord_grid is not None:
+            analysis["adaptive_chord_grid"] = adaptive_chord_grid
+        if chord_detect_grid_unit:
+            analysis["chord_detect_grid_unit"] = chord_detect_grid_unit
+        if chord_grid_unit:
+            analysis["chord_grid_unit"] = chord_grid_unit
+        if chord_detail_mode:
+            analysis["chord_detail_mode"] = chord_detail_mode
 
         sections = StructureExtractor().extract_sections(midi, analysis)
         key_result = KeyDetector().detect(

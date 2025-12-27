@@ -37,6 +37,14 @@ class DatasetExporter:
         lines.append(f"GRID_UNIT={global_meta['grid_unit']}")
         if global_meta.get("chord_grid_unit"):
             lines.append(f"CHORD_GRID_UNIT={global_meta['chord_grid_unit']}")
+        if global_meta.get("chord_detect_grid_unit"):
+            lines.append(f"CHORD_DETECT_GRID_UNIT={global_meta['chord_detect_grid_unit']}")
+        if global_meta.get("chord_export_grid_mode"):
+            lines.append(f"CHORD_EXPORT_GRID_MODE={global_meta['chord_export_grid_mode']}")
+        if global_meta.get("chord_export_grid_selected"):
+            lines.append(f"CHORD_EXPORT_GRID_SELECTED={global_meta['chord_export_grid_selected']}")
+        if global_meta.get("chord_export_grid_stats"):
+            lines.append(f"CHORD_EXPORT_GRID_STATS={global_meta['chord_export_grid_stats']}")
         if global_meta.get("key"):
             lines.append(f"KEY={global_meta['key']}")
         lines.append(f"GENRE={genre}")
@@ -89,6 +97,11 @@ class DatasetExporter:
             lines.append("PROG=")
             for bar in sec.prog_grid:
                 lines.append("| " + " ".join(bar) + " |")
+
+            if sec.prog_ext_grid:
+                lines.append("PROG_EXT=")
+                for bar in sec.prog_ext_grid:
+                    lines.append("| " + " ".join(bar) + " |")
 
             ctrl_parts = []
             for key in self.CTRL_ORDER:

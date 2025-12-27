@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -24,6 +25,7 @@ class SlotInfo:
     bass_pc: Optional[int]
     bass_strength: float
     note_count: int
+    margin: float
 
 
 class ChordProgressionExtractor:
@@ -53,11 +55,18 @@ class ChordProgressionExtractor:
         sus_penalty: float = 0.03,
         sus_third_penalty: float = 0.3,
         sus_tiebreak_margin: float = 0.1,
+        sus_strict_min: float = 0.18,
+        sus_strict_max_third: float = 0.08,
+        sus_strict_penalty: float = 0.25,
+        no3_third_max: float = 0.1,
+        no3_fifth_min: float = 0.12,
+        no3_bonus: float = 0.05,
+        no3_penalty: float = 0.2,
         diatonic_bonus: float = 0.12,
         nondiatonic_penalty: float = 0.08,
         diatonic_chord_penalty: float = 0.04,
         min_diatonic_chord_ratio: float = 0.5,
-        melody_penalty: float = 0,
+        melody_penalty: float = 0.2,
         harmony_boost: float = 2.5,
         bass_root_bonus: float = 2.0,
         triad_bonus: float = 0.05,
@@ -67,6 +76,10 @@ class ChordProgressionExtractor:
         bass_change_bonus: float = 0.05,
         use_role_tracks_only: bool = True,
         ignore_melody: bool = True,
+        downsample_min_duration_bars: float = 0.5,
+        downsample_confidence_keep: float = 0.35,
+        bass_consistency_confidence: float = 0.45,
+        downbeat_bonus: float = 0.2,
     ):
         self.grid_unit = grid_unit
         self.min_notes = min_notes
@@ -76,6 +89,13 @@ class ChordProgressionExtractor:
         self.sus_penalty = max(0.0, float(sus_penalty))
         self.sus_third_penalty = max(0.0, float(sus_third_penalty))
         self.sus_tiebreak_margin = max(0.0, float(sus_tiebreak_margin))
+        self.sus_strict_min = max(0.0, float(sus_strict_min))
+        self.sus_strict_max_third = max(0.0, float(sus_strict_max_third))
+        self.sus_strict_penalty = max(0.0, float(sus_strict_penalty))
+        self.no3_third_max = max(0.0, float(no3_third_max))
+        self.no3_fifth_min = max(0.0, float(no3_fifth_min))
+        self.no3_bonus = max(0.0, float(no3_bonus))
+        self.no3_penalty = max(0.0, float(no3_penalty))
         self.diatonic_bonus = max(0.0, float(diatonic_bonus))
         self.nondiatonic_penalty = max(0.0, float(nondiatonic_penalty))
         self.diatonic_chord_penalty = max(0.0, float(diatonic_chord_penalty))
@@ -90,6 +110,10 @@ class ChordProgressionExtractor:
         self.bass_change_bonus = max(0.0, float(bass_change_bonus))
         self.use_role_tracks_only = bool(use_role_tracks_only)
         self.ignore_melody = bool(ignore_melody)
+        self.downsample_min_duration_bars = max(0.0, float(downsample_min_duration_bars))
+        self.downsample_confidence_keep = max(0.0, float(downsample_confidence_keep))
+        self.bass_consistency_confidence = max(0.0, float(bass_consistency_confidence))
+        self.downbeat_bonus = float(downbeat_bonus)
 
         # 1. Detection Templates (Balanced for general musicality)
         self.templates = {
@@ -113,6 +137,9 @@ class ChordProgressionExtractor:
             # Sustain
             "sus4": {0: 0.9, 5: 0.9, 7: 0.5},
             "sus2": {0: 0.9, 2: 0.9, 7: 0.5},
+
+            # No 3rd (Power chord)
+            "no3":  {0: 1.0, 7: 1.0},
         }
 
         # 2. Strategic Vocabulary Mapping (Compression)
@@ -123,19 +150,32 @@ class ChordProgressionExtractor:
             "sus4": "sus4",
             "dim": "dim7", "dim7": "dim7",
             "m7b5": "m7b5",
+            "no3": "5",
         }
 
-    def extract(self, midi: pretty_midi.PrettyMIDI, section: Section, analysis: Dict, slots_per_bar: int) -> List[List[str]]:
+    def extract(
+        self,
+        midi: pretty_midi.PrettyMIDI,
+        section: Section,
+        analysis: Dict,
+        detect_slots_per_bar: int,
+        export_slots_per_bar: Optional[int] = None,
+    ) -> Tuple[List[List[str]], Optional[List[List[str]]], int]:
         bars = analysis.get("bars", [])
         if not bars:
-            return []
+            return [], None, max(1, int(export_slots_per_bar or detect_slots_per_bar or 1))
 
         section_bars = bars[section.start_bar : section.end_bar]
         global_key = analysis.get("global_key")
         roman_key = section.local_key or global_key
         absolute_chords = bool(analysis.get("absolute_chords", False))
         
-        slots_per_bar = max(1, int(slots_per_bar))
+        detect_slots_per_bar = max(1, int(detect_slots_per_bar))
+        if export_slots_per_bar is None:
+            export_slots_per_bar = detect_slots_per_bar
+        export_slots_per_bar = max(1, int(export_slots_per_bar))
+        if export_slots_per_bar > detect_slots_per_bar:
+            export_slots_per_bar = detect_slots_per_bar
 
         role_tracks = analysis.get("role_tracks") or {}
         bass_track_ids = set(role_tracks.get("BASS") or [])
@@ -147,9 +187,9 @@ class ChordProgressionExtractor:
         
         for bar_idx, bar in enumerate(section_bars):
             bar_dur = bar["end"] - bar["start"]
-            slot_dur = bar_dur / slots_per_bar if slots_per_bar > 0 else 0.0
+            slot_dur = bar_dur / detect_slots_per_bar if detect_slots_per_bar > 0 else 0.0
 
-            for s in range(slots_per_bar):
+            for s in range(detect_slots_per_bar):
                 s_time = bar["start"] + s * slot_dur
                 e_time = s_time + slot_dur
 
@@ -167,7 +207,7 @@ class ChordProgressionExtractor:
                 
                 if not candidates:
                     candidates = [ChordCandidate(root_pc=0, quality="N.C.", score=0.0)]
-                
+                margin = self._candidate_margin(candidates)
                 all_slots.append(
                     SlotInfo(
                         bar_idx=bar_idx,
@@ -176,11 +216,12 @@ class ChordProgressionExtractor:
                         bass_pc=bass_pc,
                         bass_strength=bass_strength,
                         note_count=note_count,
+                        margin=margin,
                     )
                 )
 
         if not all_slots:
-            return []
+            return [], None, export_slots_per_bar
 
         # --- Step 2: Viterbi Algorithm ---
         T = len(all_slots)
@@ -218,50 +259,49 @@ class ChordProgressionExtractor:
         for t in range(T-1, 0, -1):
             best_path_indices[t-1] = backpointer[t][best_path_indices[t]]
 
-        # --- Step 3: Format Output (event + hold) ---
-        slot_tokens: List[str] = []
+        # --- Step 3: Downsample + Format Output ---
+        chosen_chords: List[ChordCandidate] = []
+        slot_confidence: List[float] = []
+        slot_bass: List[Optional[int]] = []
         for idx in range(T):
             cand_idx = best_path_indices[idx]
             chord = all_slots[idx].candidates[cand_idx]
+            chosen_chords.append(chord)
+            slot_confidence.append(self._slot_confidence(all_slots[idx]))
+            slot_bass.append(all_slots[idx].bass_pc)
 
-            if chord.quality == "N.C.":
-                token = "N.C."
-            elif absolute_chords:
-                target_quality = self.quality_map.get(chord.quality, "maj")
-                token = self._absolute_chord(chord.root_pc, target_quality)
-            else:
-                token = self._roman(chord, roman_key)
-            slot_tokens.append(token)
+        chords_out = chosen_chords
+        conf_out = slot_confidence
+        bass_out = slot_bass
 
-        slot_tokens = self._merge_single_slot_changes(slot_tokens)
-        slot_tokens = self._replace_short_nc(slot_tokens, max_len=1)
+        if export_slots_per_bar < detect_slots_per_bar:
+            chords_out, conf_out, bass_out = self._downsample_chords(
+                chosen_chords,
+                slot_confidence,
+                slot_bass,
+                detect_slots_per_bar,
+                export_slots_per_bar,
+            )
 
-        prog_grid: List[List[str]] = []
-        slot_idx = 0
-        for _ in section_bars:
-            bar_tokens: List[str] = []
-            prev_token = None
-            for s in range(slots_per_bar):
-                if slot_idx >= len(slot_tokens):
-                    token = "N.C."
-                else:
-                    token = slot_tokens[slot_idx]
-                slot_idx += 1
+        chords_out = self._apply_bass_consistency(chords_out, conf_out, bass_out)
+        chords_out = self._apply_min_duration(chords_out, conf_out, export_slots_per_bar)
+        chords_out = self._merge_single_slot_changes_chords(chords_out)
+        chords_out = self._replace_short_nc_chords(chords_out, max_len=1)
 
-                if s == 0:
-                    bar_tokens.append(token)
-                    prev_token = token
-                    continue
+        split_mode = analysis.get("chord_detail_mode") == "split"
+        slot_tokens, ext_tokens = self._render_tokens(
+            chords_out,
+            roman_key,
+            absolute_chords,
+            split_mode,
+        )
 
-                if token == prev_token:
-                    bar_tokens.append("-")
-                else:
-                    bar_tokens.append(token)
-                    prev_token = token
+        prog_grid = self._format_grid(slot_tokens, export_slots_per_bar, section_bars)
+        prog_ext_grid = None
+        if ext_tokens is not None:
+            prog_ext_grid = self._format_grid(ext_tokens, export_slots_per_bar, section_bars)
 
-            prog_grid.append(bar_tokens)
-
-        return prog_grid
+        return prog_grid, prog_ext_grid, export_slots_per_bar
 
     def _get_transition_score(
         self,
@@ -307,6 +347,288 @@ class ChordProgressionExtractor:
             score += self.bass_change_bonus if not same_chord else -self.bass_change_bonus
 
         return score
+
+    def _candidate_margin(self, candidates: List[ChordCandidate]) -> float:
+        if not candidates:
+            return 0.0
+        if len(candidates) == 1:
+            return float(candidates[0].score)
+        return float(candidates[0].score - candidates[1].score)
+
+    def _slot_confidence(self, slot: SlotInfo) -> float:
+        return max(0.0, float(slot.margin))
+
+    def _downsample_chords(
+        self,
+        chords: List[ChordCandidate],
+        confidences: List[float],
+        bass_pcs: List[Optional[int]],
+        detect_slots_per_bar: int,
+        export_slots_per_bar: int,
+    ) -> Tuple[List[ChordCandidate], List[float], List[Optional[int]]]:
+        if export_slots_per_bar <= 0:
+            return chords, confidences, bass_pcs
+        if detect_slots_per_bar % export_slots_per_bar != 0:
+            return chords, confidences, bass_pcs
+        group = detect_slots_per_bar // export_slots_per_bar
+        if group <= 1:
+            return chords, confidences, bass_pcs
+
+        out_chords: List[ChordCandidate] = []
+        out_conf: List[float] = []
+        out_bass: List[Optional[int]] = []
+
+        for i in range(0, len(chords), group):
+            group_chords = chords[i : i + group]
+            group_conf = confidences[i : i + group]
+            group_bass = bass_pcs[i : i + group]
+            chosen, conf, bass_pc = self._choose_group_chord(group_chords, group_conf, group_bass)
+            out_chords.append(chosen)
+            out_conf.append(conf)
+            out_bass.append(bass_pc)
+
+        return out_chords, out_conf, out_bass
+
+    def _choose_group_chord(
+        self,
+        group_chords: List[ChordCandidate],
+        group_conf: List[float],
+        group_bass: List[Optional[int]],
+    ) -> Tuple[ChordCandidate, float, Optional[int]]:
+        if not group_chords:
+            return ChordCandidate(root_pc=0, quality="N.C.", score=0.0), 0.0, None
+
+        scores: Dict[Tuple[int, str], float] = {}
+        representatives: Dict[Tuple[int, str], ChordCandidate] = {}
+        total_weight = 0.0
+
+        for idx, chord in enumerate(group_chords):
+            weight = 1.0 + min(1.0, max(0.0, group_conf[idx] if idx < len(group_conf) else 0.0))
+            if idx == 0:
+                weight += self.downbeat_bonus
+            if (
+                idx < len(group_bass)
+                and group_bass[idx] is not None
+                and chord.quality != "N.C."
+                and group_bass[idx] == chord.root_pc
+            ):
+                weight += 0.1
+            key = (chord.root_pc, chord.quality)
+            scores[key] = scores.get(key, 0.0) + weight
+            representatives.setdefault(key, chord)
+            total_weight += weight
+
+        best_key = max(scores.items(), key=lambda item: item[1])[0]
+        best_score = scores[best_key]
+        confidence = best_score / total_weight if total_weight > 0 else 0.0
+        bass_pc = self._mode_pc(group_bass)
+        return representatives[best_key], confidence, bass_pc
+
+    def _mode_pc(self, values: List[Optional[int]]) -> Optional[int]:
+        counts: Dict[int, int] = {}
+        for val in values:
+            if val is None:
+                continue
+            counts[val] = counts.get(val, 0) + 1
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda item: item[1])[0]
+
+    def _apply_bass_consistency(
+        self,
+        chords: List[ChordCandidate],
+        confidences: List[float],
+        bass_pcs: List[Optional[int]],
+    ) -> List[ChordCandidate]:
+        if not chords:
+            return chords
+        adjusted = list(chords)
+        for i in range(1, len(adjusted)):
+            if i >= len(bass_pcs):
+                break
+            prev_bass = bass_pcs[i - 1]
+            curr_bass = bass_pcs[i]
+            if prev_bass is None or curr_bass is None:
+                continue
+            if prev_bass != curr_bass:
+                continue
+            if self._chord_equal(adjusted[i], adjusted[i - 1]):
+                continue
+            if i < len(confidences) and confidences[i] < self.bass_consistency_confidence:
+                adjusted[i] = adjusted[i - 1]
+        return adjusted
+
+    def _apply_min_duration(
+        self,
+        chords: List[ChordCandidate],
+        confidences: List[float],
+        slots_per_bar: int,
+    ) -> List[ChordCandidate]:
+        if not chords:
+            return chords
+        min_slots = int(math.ceil(self.downsample_min_duration_bars * max(1, slots_per_bar)))
+        min_slots = max(1, min_slots)
+
+        adjusted = list(chords)
+        i = 0
+        while i < len(adjusted):
+            j = i + 1
+            while j < len(adjusted) and self._chord_equal(adjusted[j], adjusted[i]):
+                j += 1
+            run_len = j - i
+            run_conf = max(confidences[i:j] or [0.0])
+            if run_len < min_slots and run_conf < self.downsample_confidence_keep:
+                prev_chord = adjusted[i - 1] if i > 0 else None
+                next_chord = adjusted[j] if j < len(adjusted) else None
+                fill = prev_chord or next_chord
+                if fill is not None:
+                    for k in range(i, j):
+                        adjusted[k] = fill
+            i = j
+        return adjusted
+
+    def _merge_single_slot_changes_chords(self, chords: List[ChordCandidate]) -> List[ChordCandidate]:
+        if len(chords) < 3:
+            return chords
+        merged = list(chords)
+        for i in range(1, len(merged) - 1):
+            if not self._chord_equal(merged[i], merged[i - 1]) and self._chord_equal(merged[i - 1], merged[i + 1]):
+                merged[i] = merged[i - 1]
+        return merged
+
+    def _replace_short_nc_chords(self, chords: List[ChordCandidate], max_len: int = 1) -> List[ChordCandidate]:
+        if not chords:
+            return chords
+        replaced = list(chords)
+        i = 0
+        while i < len(replaced):
+            if replaced[i].quality != "N.C.":
+                i += 1
+                continue
+            j = i + 1
+            while j < len(replaced) and replaced[j].quality == "N.C.":
+                j += 1
+            run_len = j - i
+            if run_len <= max_len:
+                prev_chord = replaced[i - 1] if i > 0 else None
+                next_chord = replaced[j] if j < len(replaced) else None
+                fill = prev_chord or next_chord
+                if fill is not None and fill.quality != "N.C.":
+                    for k in range(i, j):
+                        replaced[k] = fill
+            i = j
+        return replaced
+
+    def _render_tokens(
+        self,
+        chords: List[ChordCandidate],
+        roman_key: Optional[str],
+        absolute_chords: bool,
+        split_mode: bool,
+    ) -> Tuple[List[str], Optional[List[str]]]:
+        slot_tokens: List[str] = []
+        ext_tokens: Optional[List[str]] = [] if split_mode else None
+
+        for chord in chords:
+            if chord.quality == "N.C.":
+                token = "N.C."
+                ext_token = "N.C."
+            elif split_mode:
+                base_quality, ext = self._split_quality(chord.quality)
+                if absolute_chords:
+                    token = self._absolute_chord_base(chord.root_pc, base_quality)
+                else:
+                    token = self._roman_base(chord.root_pc, base_quality, roman_key)
+                ext_token = ext or "NONE"
+            elif absolute_chords:
+                target_quality = self.quality_map.get(chord.quality, "maj")
+                token = self._absolute_chord(chord.root_pc, target_quality)
+                ext_token = None
+            else:
+                token = self._roman(chord, roman_key)
+                ext_token = None
+
+            slot_tokens.append(token)
+            if ext_tokens is not None:
+                ext_tokens.append(ext_token or "NONE")
+
+        return slot_tokens, ext_tokens
+
+    def _format_grid(
+        self,
+        slot_tokens: List[str],
+        slots_per_bar: int,
+        section_bars: List[Dict],
+    ) -> List[List[str]]:
+        prog_grid: List[List[str]] = []
+        slot_idx = 0
+        for _ in section_bars:
+            bar_tokens: List[str] = []
+            prev_token = None
+            for s in range(slots_per_bar):
+                if slot_idx >= len(slot_tokens):
+                    token = "N.C."
+                else:
+                    token = slot_tokens[slot_idx]
+                slot_idx += 1
+
+                if s == 0:
+                    bar_tokens.append(token)
+                    prev_token = token
+                    continue
+
+                if token == prev_token:
+                    bar_tokens.append("-")
+                else:
+                    bar_tokens.append(token)
+                    prev_token = token
+
+            prog_grid.append(bar_tokens)
+        return prog_grid
+
+    def _split_quality(self, quality: str) -> Tuple[str, Optional[str]]:
+        if quality in {"maj", "7", "maj7", "sus2", "sus4"}:
+            return "maj", quality if quality not in {"maj"} else None
+        if quality in {"min", "m7"}:
+            return "min", "m7" if quality == "m7" else None
+        if quality in {"dim", "dim7", "m7b5"}:
+            ext = quality if quality != "dim" else None
+            return "dim", ext
+        if quality == "aug":
+            return "aug", None
+        if quality == "no3":
+            return "5", "NO3"
+        return "maj", None
+
+    def _roman_base(self, root_pc: int, base_quality: str, key: Optional[str]) -> str:
+        if not key or key == "UNKNOWN":
+            return self._absolute_chord_base(root_pc, base_quality)
+
+        tonic_pc, _ = self._parse_key(key)
+        degree = (root_pc - tonic_pc) % 12
+        numeral = self._degree_to_roman(degree, base_quality)
+        if base_quality == "dim":
+            numeral += "o"
+        elif base_quality == "aug":
+            numeral += "+"
+        elif base_quality == "5":
+            numeral += "5"
+        return numeral
+
+    def _absolute_chord_base(self, root_pc: int, quality: str) -> str:
+        names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        name = names[root_pc % 12]
+        suffix_map = {
+            "maj": "",
+            "min": "m",
+            "dim": "dim",
+            "aug": "aug",
+            "5": "5",
+        }
+        return name + suffix_map.get(quality, "")
+
+    def _chord_equal(self, a: ChordCandidate, b: ChordCandidate) -> bool:
+        return a.root_pc == b.root_pc and a.quality == b.quality
 
     def _merge_single_slot_changes(self, tokens: List[str]) -> List[str]:
         if len(tokens) < 3:
@@ -404,7 +726,8 @@ class ChordProgressionExtractor:
                     has_bass = True
 
         bass_strength = float(bass_hist.sum())
-        if hist.sum() == 0 or note_count < min_notes:
+        hist_sum = float(hist.sum())
+        if hist_sum == 0 or note_count < min_notes:
             return [], None, bass_strength, note_count
             
         diatonic_pc = set()
@@ -431,6 +754,9 @@ class ChordProgressionExtractor:
                 for interval, weight in intervals.items():
                     tpl[(root + interval) % 12] = weight
                 score = self._cosine_similarity(hist, tpl)
+                third_strength = max(hist[(root + 3) % 12], hist[(root + 4) % 12])
+                third_ratio = third_strength / hist_sum if hist_sum > 0 else 0.0
+                fifth_ratio = hist[(root + 7) % 12] / hist_sum if hist_sum > 0 else 0.0
                 
                 if diatonic_pc:
                     if root in diatonic_pc:
@@ -469,9 +795,17 @@ class ChordProgressionExtractor:
                 
                 if quality in ["sus2", "sus4"]:
                     score -= self.sus_penalty
-                    third_strength = max(hist[(root + 3) % 12], hist[(root + 4) % 12])
-                    if hist.sum() > 0 and third_strength >= 0.2 * hist.sum():
+                    sus_pc = (root + 5) % 12 if quality == "sus4" else (root + 2) % 12
+                    sus_ratio = hist[sus_pc] / hist_sum if hist_sum > 0 else 0.0
+                    if third_ratio > self.sus_strict_max_third or sus_ratio < self.sus_strict_min:
+                        score -= self.sus_strict_penalty
+                    if third_ratio >= 0.2:
                         score -= self.sus_third_penalty
+                elif quality == "no3":
+                    if third_ratio > self.no3_third_max or fifth_ratio < self.no3_fifth_min:
+                        score -= self.no3_penalty
+                    else:
+                        score += self.no3_bonus
                 
                 if score > 0.05:
                     candidates.append(ChordCandidate(root, quality, score))
@@ -503,6 +837,7 @@ class ChordProgressionExtractor:
         elif target_quality == "sus4": numeral += "sus4"
         elif target_quality == "dim7": numeral += "o7"
         elif target_quality == "m7b5": numeral += "h7"
+        elif target_quality == "5": numeral += "5"
 
         return numeral
 
@@ -521,7 +856,7 @@ class ChordProgressionExtractor:
         name = names[root_pc % 12]
         suffix_map = {
             "maj": "", "min": "m", "maj7": "maj7", "7": "7", "m7": "m7",
-            "sus2": "sus2", "sus4": "sus4", "dim7": "dim7", "m7b5": "m7b5"
+            "sus2": "sus2", "sus4": "sus4", "dim7": "dim7", "m7b5": "m7b5", "5": "5"
         }
         return name + suffix_map.get(quality, "")
 

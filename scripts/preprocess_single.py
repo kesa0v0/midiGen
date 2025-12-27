@@ -60,6 +60,35 @@ def parse_args():
         action="store_true",
         help="Output absolute chord names instead of roman numerals",
     )
+    grid_group = parser.add_mutually_exclusive_group()
+    grid_group.add_argument(
+        "--adaptive-chord-grid",
+        dest="adaptive_chord_grid",
+        action="store_true",
+        help="Enable adaptive chord grid selection",
+    )
+    grid_group.add_argument(
+        "--fixed-chord-grid",
+        dest="adaptive_chord_grid",
+        action="store_false",
+        help="Disable adaptive chord grid selection",
+    )
+    parser.set_defaults(adaptive_chord_grid=None)
+    parser.add_argument(
+        "--chord-detect-grid-unit",
+        choices=["1/1", "1/2", "1/4", "1/8", "1/16"],
+        help="Detection grid unit for chord analysis",
+    )
+    parser.add_argument(
+        "--chord-grid-unit",
+        choices=["1/1", "1/2", "1/4", "1/8", "1/16"],
+        help="Export grid unit for chord output",
+    )
+    parser.add_argument(
+        "--chord-detail-mode",
+        choices=["split"],
+        help="Split chord base and extension into separate grids",
+    )
     return parser.parse_args()
 
 
@@ -89,6 +118,10 @@ def main():
             inst_type=args.inst_type,
             debug_key=args.debug_key,
             abs_chords=args.abs_chords,
+            adaptive_chord_grid=args.adaptive_chord_grid,
+            chord_detect_grid_unit=args.chord_detect_grid_unit,
+            chord_grid_unit=args.chord_grid_unit,
+            chord_detail_mode=args.chord_detail_mode,
         )
         print(f"[DONE] Processing complete. Check output in {output_path}")
     except Exception as e:

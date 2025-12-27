@@ -1,4 +1,7 @@
-﻿import numpy as np
+from collections import Counter
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 from models import ConductorSection, TimeSignature
 
@@ -22,7 +25,15 @@ class ConductorTokenGenerator:
         global_key = analysis.get("global_key", None)
         # grid_unit??臾댁“嫄?1/4濡?怨좎젙 (遺꾩꽍 寃곌낵 臾댁떆)
         grid_unit = self._grid_unit(analysis, global_ts)
-        chord_grid_unit = self._chord_grid_unit(analysis, global_ts)
+        chord_detect_grid_unit = self._chord_detect_grid_unit(analysis, global_ts)
+        chord_grid_unit, chord_grid_mode, chord_grid_stats = self._chord_grid_unit(
+            analysis,
+            global_ts,
+            sections,
+            prog_extractor,
+            midi=midi,
+            detect_grid_unit=chord_detect_grid_unit,
+        )
         midi_type = analysis.get("midi_type")
         ticks_per_beat = analysis.get("ticks_per_beat")
         channel_programs = analysis.get("channel_programs")
@@ -34,8 +45,15 @@ class ConductorTokenGenerator:
             local_ts = sec.local_time_sig or TimeSignature(*global_ts)
             local_key = sec.local_key or global_key
 
-            slots_per_bar = self._slots_per_bar(local_ts, chord_grid_unit)
-            prog = prog_extractor.extract(midi, sec, analysis, slots_per_bar)
+            detect_slots_per_bar = self._slots_per_bar(local_ts, chord_detect_grid_unit)
+            export_slots_per_bar = self._slots_per_bar(local_ts, chord_grid_unit)
+            prog, prog_ext, used_slots = prog_extractor.extract(
+                midi,
+                sec,
+                analysis,
+                detect_slots_per_bar,
+                export_slots_per_bar=export_slots_per_bar,
+            )
             ctrl = ctrl_extractor.extract(midi, sec, analysis)
 
             conductor_sections.append(
@@ -46,8 +64,9 @@ class ConductorTokenGenerator:
                     time_sig=local_ts,
                     key=local_key,
                     prog_grid=prog,
+                    prog_ext_grid=prog_ext,
                     control_tokens=ctrl,
-                    slots_per_bar=slots_per_bar,
+                    slots_per_bar=used_slots,
                 )
             )
 
@@ -62,6 +81,10 @@ class ConductorTokenGenerator:
                 "key": global_key,
                 "grid_unit": grid_unit,
                 "chord_grid_unit": chord_grid_unit,
+                "chord_detect_grid_unit": chord_detect_grid_unit,
+                "chord_export_grid_mode": chord_grid_mode,
+                "chord_export_grid_selected": chord_grid_unit,
+                "chord_export_grid_stats": chord_grid_stats,
                 "midi_type": midi_type,
                 "ticks_per_beat": ticks_per_beat,
                 "channel_programs": channel_programs,
@@ -85,11 +108,42 @@ class ConductorTokenGenerator:
             return "1/8"
         return self.default_grid_unit
 
-    def _chord_grid_unit(self, analysis, global_ts):
+    def _chord_grid_unit(
+        self,
+        analysis,
+        global_ts,
+        sections,
+        prog_extractor,
+        midi=None,
+        detect_grid_unit: str = "1/4",
+    ):
         if "chord_grid_unit" in analysis:
-            return analysis["chord_grid_unit"]
+            return analysis["chord_grid_unit"], "FIXED", "source=chord_grid_unit"
         if "harmonic_grid_unit" in analysis:
-            return analysis["harmonic_grid_unit"]
+            return analysis["harmonic_grid_unit"], "FIXED", "source=harmonic_grid_unit"
+        if analysis.get("adaptive_chord_grid", True) and midi is not None:
+            grid, stats = self._adaptive_chord_grid_unit(
+                analysis,
+                global_ts,
+                sections,
+                prog_extractor,
+                midi,
+                detect_grid_unit,
+            )
+            return grid, "ADAPTIVE", stats
+        return self._default_chord_grid_unit(global_ts), "FIXED", "source=default"
+
+    def _chord_detect_grid_unit(self, analysis, global_ts):
+        if "chord_detect_grid_unit" in analysis:
+            return analysis["chord_detect_grid_unit"]
+        if "harmonic_detect_grid_unit" in analysis:
+            return analysis["harmonic_detect_grid_unit"]
+        _, den = global_ts
+        if den >= 8:
+            return "1/8"
+        return "1/4"
+
+    def _default_chord_grid_unit(self, global_ts):
         _, den = global_ts
         if den >= 8:
             return "1/8"
@@ -108,6 +162,172 @@ class ConductorTokenGenerator:
             g_den = 4
         slots = int(num * (g_den / den))
         return max(1, slots)
+
+    def _adaptive_chord_grid_unit(
+        self,
+        analysis,
+        global_ts,
+        sections,
+        prog_extractor,
+        midi,
+        detect_grid_unit: str,
+    ) -> Tuple[str, str]:
+        if not sections:
+            return self._default_chord_grid_unit(global_ts), "stats=empty_sections"
+
+        run_lengths_bars: List[float] = []
+        loss_1_2_groups: List[float] = []
+        loss_1_1_groups: List[float] = []
+
+        analysis_tmp = dict(analysis)
+        analysis_tmp["absolute_chords"] = True
+        analysis_tmp["chord_detail_mode"] = "split"
+
+        for sec in sections:
+            local_ts = sec.local_time_sig or TimeSignature(*global_ts)
+            detect_slots_per_bar = self._slots_per_bar(local_ts, detect_grid_unit)
+            if detect_slots_per_bar <= 0:
+                continue
+            prog_grid, _, _ = prog_extractor.extract(
+                midi,
+                sec,
+                analysis_tmp,
+                detect_slots_per_bar,
+                export_slots_per_bar=detect_slots_per_bar,
+            )
+            if not prog_grid:
+                continue
+            expanded = self._expand_prog_grid(prog_grid)
+            run_lengths_bars.extend(self._run_lengths_bars(expanded, detect_slots_per_bar))
+
+            slots_half = self._slots_per_bar(local_ts, "1/2")
+            loss_1_2_groups.extend(
+                self._merge_loss(expanded, detect_slots_per_bar, slots_half)
+            )
+
+            slots_whole = self._slots_per_bar(local_ts, "1/1")
+            loss_1_1_groups.extend(
+                self._merge_loss(expanded, detect_slots_per_bar, slots_whole)
+            )
+
+        if not run_lengths_bars:
+            return self._default_chord_grid_unit(global_ts), "stats=empty_runs"
+
+        median_change_bars = float(np.median(run_lengths_bars))
+        loss_1_2 = float(np.mean(loss_1_2_groups)) if loss_1_2_groups else None
+        loss_1_1 = float(np.mean(loss_1_1_groups)) if loss_1_1_groups else None
+
+        loss_1_2_threshold = 0.35
+        loss_1_1_threshold = 0.12
+        loss_delta_threshold = 0.05
+        min_change_for_whole = 1.5
+        loss_delta = None
+        if loss_1_1 is not None and loss_1_2 is not None:
+            loss_delta = loss_1_1 - loss_1_2
+
+        if (
+            median_change_bars <= 0.25
+            and loss_1_2 is not None
+            and loss_1_2 >= loss_1_2_threshold
+        ):
+            selected = "1/4"
+        elif loss_delta is not None and loss_delta >= loss_delta_threshold:
+            selected = "1/2"
+        elif (
+            median_change_bars >= min_change_for_whole
+            and loss_1_1 is not None
+            and loss_1_1 <= loss_1_1_threshold
+        ):
+            selected = "1/1"
+        else:
+            selected = "1/2"
+
+        stats = self._grid_stats_string(
+            median_change_bars,
+            loss_1_2,
+            loss_1_1,
+            len(run_lengths_bars),
+            len(loss_1_2_groups),
+            len(loss_1_1_groups),
+            loss_delta,
+        )
+        return selected, stats
+
+    def _grid_stats_string(
+        self,
+        median_change_bars: float,
+        loss_1_2: Optional[float],
+        loss_1_1: Optional[float],
+        run_samples: int,
+        groups_1_2: int,
+        groups_1_1: int,
+        loss_delta: Optional[float],
+    ) -> str:
+        return (
+            f"median_change_bars={self._fmt_optional(median_change_bars)}"
+            f",loss_1_2={self._fmt_optional(loss_1_2)}"
+            f",loss_1_1={self._fmt_optional(loss_1_1)}"
+            f",loss_delta={self._fmt_optional(loss_delta)}"
+            f",run_samples={run_samples}"
+            f",groups_1_2={groups_1_2}"
+            f",groups_1_1={groups_1_1}"
+        )
+
+    def _fmt_optional(self, value: Optional[float]) -> str:
+        if value is None:
+            return "NA"
+        return f"{value:.3f}"
+
+    def _run_lengths_bars(self, tokens: List[str], slots_per_bar: int) -> List[float]:
+        runs: List[float] = []
+        prev = None
+        run = 0
+        for tok in tokens:
+            if tok == "N.C.":
+                if prev is not None:
+                    runs.append(run / slots_per_bar)
+                prev = None
+                run = 0
+                continue
+            if prev is None:
+                prev = tok
+                run = 1
+                continue
+            if tok == prev:
+                run += 1
+            else:
+                runs.append(run / slots_per_bar)
+                prev = tok
+                run = 1
+        if prev is not None:
+            runs.append(run / slots_per_bar)
+        return runs
+
+    def _merge_loss(
+        self,
+        tokens: List[str],
+        detect_slots_per_bar: int,
+        target_slots_per_bar: int,
+    ) -> List[float]:
+        if target_slots_per_bar <= 0:
+            return []
+        if detect_slots_per_bar % target_slots_per_bar != 0:
+            return []
+        group = detect_slots_per_bar // target_slots_per_bar
+        if group <= 1:
+            return []
+
+        losses: List[float] = []
+        for i in range(0, len(tokens), group):
+            group_tokens = [tok for tok in tokens[i : i + group] if tok != "N.C."]
+            if not group_tokens:
+                continue
+            counts = Counter(group_tokens)
+            dominant = max(counts.values())
+            loss = 1.0 - (dominant / len(group_tokens))
+            losses.append(loss)
+        return losses
+
 
     def _apply_hooks(self, conductor_sections, sections, analysis, form):
         # HOOK/REPEAT ?먯젙 媛쒖꽑: MAIN_THEME??臾댁“嫄?HOOK, 諛섎났 肄붾뱶 吏꾪뻾? IDENTICAL
@@ -211,6 +431,8 @@ class ConductorTokenGenerator:
                     similarity = self._token_similarity(best_sig, expanded)
                     if similarity >= similarity_threshold:
                         csec.prog_grid = [list(row) for row in base_csec.prog_grid]
+                        if base_csec.prog_ext_grid is not None:
+                            csec.prog_ext_grid = [list(row) for row in base_csec.prog_ext_grid]
 
     def _expand_prog_grid(self, prog_grid):
         expanded = []
