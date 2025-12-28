@@ -12,10 +12,10 @@ titans-pytorch
 accelerate
 pytorch-lightning
 flash-attn
-git+https://github.com/jthickstun/anticipation.git
 midiutil
 miditoolkit
 numpy
 pretty_midi
 music21
 scikit-learn
+note_seq

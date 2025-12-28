@@ -1,90 +1,188 @@
-from typing import Optional
+from __future__ import annotations
 
-from chord_progression import ChordProgressionExtractor
-from conductor_generator import ConductorTokenGenerator
-from control_tokens import ControlTokenExtractor
-from exporter import DatasetExporter
-from instrument_assigner import InstrumentRoleAssigner
-from key_detection import KeyDetector
-from midi_analyzer import MidiAnalyzer
-from midi_loader import MidiLoader
-from structure_extractor import StructureExtractor
-from validator import PostValidator, PreValidator
+import logging
+from pathlib import Path
+from typing import Dict, List
+
+from music21 import converter as m21converter
+
+try:
+    from .chord_progression import extract_chord_grid
+    from .exporter import bundle_to_text
+    from .instrument_roles import infer_instrument_roles
+    from .midi_metadata import (
+        DEFAULT_BPM,
+        DEFAULT_KEY,
+        DEFAULT_TIME_SIGNATURE,
+        format_key,
+        get_key_from_sequence,
+        get_tempo_bpm,
+        get_time_signature,
+        infer_key,
+    )
+except ImportError:  # Allows running as a script without package context.
+    from chord_progression import extract_chord_grid
+    from exporter import bundle_to_text
+    from instrument_roles import infer_instrument_roles
+    from midi_metadata import (
+        DEFAULT_BPM,
+        DEFAULT_KEY,
+        DEFAULT_TIME_SIGNATURE,
+        format_key,
+        get_key_from_sequence,
+        get_tempo_bpm,
+        get_time_signature,
+        infer_key,
+    )
+
+log = logging.getLogger(__name__)
+
+DEFAULT_GRID_UNIT = "1/16"
+DEFAULT_CTRL = "DYN:MID DEN:NORMAL MOV:STATIC FEEL:STRAIGHT"
 
 
-class DatasetBuilder:
-    def build(
-        self, 
-        midi_path: str, 
-        output_path: str,
-        genre: str = "UNKNOWN",
-        style: str = "UNKNOWN",
-        artist: str = "UNKNOWN",
-        inst_type: str = "UNKNOWN",
-        debug_key: bool = False,
-        abs_chords: bool = False,
-        adaptive_chord_grid: Optional[bool] = None,
-        chord_detect_grid_unit: Optional[str] = None,
-        chord_grid_unit: Optional[str] = None,
-        chord_detail_mode: Optional[str] = None,
-    ):
-        midi_data = MidiLoader().load(midi_path)
-        if midi_data is None:
-            return
+def build_conductor_bundle(
+    midi_path: Path,
+    grid_unit: str = DEFAULT_GRID_UNIT,
+    bars_per_section: int = 8,
+    default_ctrl: str = DEFAULT_CTRL,
+    genre: str | None = None,
+    style: str | None = None,
+) -> Dict:
+    midi_path = Path(midi_path)
+    try:
+        from note_seq import midi_io
+    except ImportError as exc:
+        raise ImportError("note_seq is required to build conductor bundles") from exc
 
-        midi = midi_data.midi
-        if not PreValidator().validate(midi):
-            print("[DatasetBuilder] Pre-validation failed.")
-            return
+    note_sequence = midi_io.midi_file_to_note_sequence(str(midi_path))
 
-        analysis = MidiAnalyzer().analyze(midi, midi_path)
-        analysis["midi_type"] = midi_data.midi_type
-        analysis["ticks_per_beat"] = midi_data.ticks_per_beat
-        analysis["channel_programs"] = midi_data.channel_programs
-        analysis["source_path"] = midi_path
-        analysis["absolute_chords"] = abs_chords
-        if adaptive_chord_grid is not None:
-            analysis["adaptive_chord_grid"] = adaptive_chord_grid
-        if chord_detect_grid_unit:
-            analysis["chord_detect_grid_unit"] = chord_detect_grid_unit
-        if chord_grid_unit:
-            analysis["chord_grid_unit"] = chord_grid_unit
-        if chord_detail_mode:
-            analysis["chord_detail_mode"] = chord_detail_mode
+    bpm = get_tempo_bpm(note_sequence)
+    ts_num, ts_den = get_time_signature(note_sequence)
+    time_sig = f"{ts_num}/{ts_den}"
 
-        sections = StructureExtractor().extract_sections(midi, analysis)
-        key_result = KeyDetector().detect(
-            midi_path,
-            [(sec.instance_id, sec.start_bar, sec.end_bar) for sec in sections],
-            debug=debug_key,
-            midi=midi,
+    key_obj = get_key_from_sequence(note_sequence)
+    if key_obj is None:
+        m21_stream = m21converter.parse(str(midi_path))
+        key_obj = infer_key(m21_stream)
+    key_str = format_key(key_obj)
+
+    prog_grid = extract_chord_grid(
+        note_sequence,
+        key_obj,
+        (ts_num, ts_den),
+        grid_unit,
+    )
+
+    sections = _segment_prog_grid(
+        prog_grid,
+        bars_per_section,
+        default_ctrl,
+    )
+
+    bundle = {
+        "global": {
+            "BPM": bpm or DEFAULT_BPM,
+            "KEY": key_str or DEFAULT_KEY,
+            "TIME_SIG": time_sig or f"{DEFAULT_TIME_SIGNATURE[0]}/{DEFAULT_TIME_SIGNATURE[1]}",
+            "GRID_UNIT": grid_unit,
+        },
+        "instruments": infer_instrument_roles(note_sequence),
+        "form": [(s["name"], s["bars"]) for s in sections],
+        "sections": sections,
+    }
+
+    if genre:
+        bundle["global"]["GENRE"] = genre
+    if style:
+        bundle["global"]["STYLE"] = style
+
+    return bundle
+
+
+def export_bundle_to_text(bundle: Dict, output_path: Path) -> None:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(bundle_to_text(bundle), encoding="utf-8")
+
+
+def process_midi_dir(
+    input_dir: Path,
+    output_dir: Path,
+    grid_unit: str = DEFAULT_GRID_UNIT,
+    bars_per_section: int = 8,
+    default_ctrl: str = DEFAULT_CTRL,
+) -> None:
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    midi_paths = list(input_dir.rglob("*.mid")) + list(input_dir.rglob("*.midi"))
+
+    for midi_path in midi_paths:
+        rel = midi_path.relative_to(input_dir)
+        out_path = output_dir / rel.with_suffix(".txt")
+        try:
+            bundle = build_conductor_bundle(
+                midi_path,
+                grid_unit=grid_unit,
+                bars_per_section=bars_per_section,
+                default_ctrl=default_ctrl,
+            )
+            export_bundle_to_text(bundle, out_path)
+        except Exception as exc:
+            log.warning("Failed to process %s: %s", midi_path, exc)
+
+
+def _segment_prog_grid(
+    prog_grid: List[List[str]],
+    bars_per_section: int,
+    default_ctrl: str,
+) -> List[Dict]:
+    sections: List[Dict] = []
+    if bars_per_section <= 0:
+        bars_per_section = max(1, len(prog_grid))
+    for idx in range(0, len(prog_grid), bars_per_section):
+        label = _section_label(idx // bars_per_section)
+        bars = prog_grid[idx : idx + bars_per_section]
+        sections.append(
+            {
+                "name": label,
+                "bars": len(bars),
+                "prog_grid": bars,
+                "ctrl": default_ctrl,
+            }
         )
-        analysis["global_key"] = key_result.global_key
-        for sec in sections:
-            key_val = key_result.section_keys.get(sec.instance_id)
-            sec.local_key = None if key_val in (None, "KEEP") else key_val
+    return sections
 
-        instruments, role_tracks = InstrumentRoleAssigner().assign_with_tracks(midi, inst_type=inst_type)
-        analysis["role_tracks"] = role_tracks
 
-        prog_extractor = ChordProgressionExtractor()
-        ctrl_extractor = ControlTokenExtractor()
+def _section_label(index: int) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if index < len(alphabet):
+        return alphabet[index]
+    label = ""
+    while index >= 0:
+        index, rem = divmod(index, len(alphabet))
+        label = alphabet[rem] + label
+        index -= 1
+    return label
 
-        conductor_bundle = ConductorTokenGenerator().generate(
-            analysis, sections, prog_extractor, ctrl_extractor, midi
-        )
 
-        if not PostValidator().validate(conductor_bundle["global"], conductor_bundle["sections"]):
-            print("[DatasetBuilder] Post-validation failed.")
-            return
+if __name__ == "__main__":
+    import argparse
 
-        DatasetExporter().export(
-            conductor_bundle,
-            instruments,
-            output_path,
-            midi_path,
-            genre=genre,
-            style=style,
-            artist=artist,
-            inst_type=inst_type
-        )
+    parser = argparse.ArgumentParser(description="Export MIDI to conductor tokens.")
+    parser.add_argument("midi_path", type=Path, help="Path to a MIDI file")
+    parser.add_argument("output_path", type=Path, help="Output .txt path")
+    parser.add_argument("--grid-unit", default=DEFAULT_GRID_UNIT)
+    parser.add_argument("--bars-per-section", type=int, default=8)
+    parser.add_argument("--genre", default=None)
+    parser.add_argument("--style", default=None)
+
+    args = parser.parse_args()
+    bundle = build_conductor_bundle(
+        args.midi_path,
+        grid_unit=args.grid_unit,
+        bars_per_section=args.bars_per_section,
+        genre=args.genre,
+        style=args.style,
+    )
+    export_bundle_to_text(bundle, args.output_path)
