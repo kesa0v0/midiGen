@@ -3,10 +3,36 @@ from __future__ import annotations
 import math
 import re
 from fractions import Fraction
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
-from music21 import chord as m21chord
-from music21 import roman as m21roman
+try:
+    from .key_detection import parse_key_name
+except ImportError:  # Script execution fallback.
+    from key_detection import parse_key_name
+
+_SCALE_DEGREES_MAJOR = [0, 2, 4, 5, 7, 9, 11]
+_SCALE_DEGREES_MINOR = [0, 2, 3, 5, 7, 8, 10]
+_ROMAN_BASE = ["I", "II", "III", "IV", "V", "VI", "VII"]
+
+_NOTE_NAME_TO_SEMITONE = {
+    "C": 0,
+    "C#": 1,
+    "Db": 1,
+    "D": 2,
+    "D#": 3,
+    "Eb": 3,
+    "E": 4,
+    "F": 5,
+    "F#": 6,
+    "Gb": 6,
+    "G": 7,
+    "G#": 8,
+    "Ab": 8,
+    "A": 9,
+    "A#": 10,
+    "Bb": 10,
+    "B": 11,
+}
 
 
 def parse_fraction(text: str) -> Fraction:
@@ -35,28 +61,42 @@ def grid_steps_per_bar(time_sig: Tuple[int, int], grid_unit: str) -> int:
 
 def extract_chord_grid(
     note_sequence,
-    key_obj,
+    key_name: str,
     time_sig: Tuple[int, int],
     grid_unit: str,
 ) -> List[List[str]]:
     try:
-        from note_seq import sequences_lib
+        from note_seq import chord_inference, sequences_lib
+        from note_seq.protobuf import music_pb2
     except ImportError as exc:
-        raise ImportError("note_seq is required for chord extraction") from exc
+        raise ImportError("note_seq is required for chord inference") from exc
 
     spq = steps_per_quarter(grid_unit)
     steps_per_bar = grid_steps_per_bar(time_sig, grid_unit)
 
-    quantized = sequences_lib.quantize_note_sequence(note_sequence, spq)
-    notes = [note for note in quantized.notes if not note.is_drum]
-    if not notes:
-        return [["N.C."] * steps_per_bar]
+    if not sequences_lib.is_quantized_sequence(note_sequence):
+        note_sequence = sequences_lib.quantize_note_sequence(note_sequence, steps_per_quarter=spq)
 
-    max_end_step = max(int(note.quantized_end_step) for note in notes)
-    total_bars = max(1, int(math.ceil(max_end_step / steps_per_bar)))
+    inferred = chord_inference.infer_chords_for_sequence(
+        note_sequence,
+        chords_per_bar=2,
+        key_change_prob=0.001,
+        chord_change_prob=0.5,
+    )
+    if inferred is None:
+        inferred = note_sequence
+
+    chord_events = []
+    for ta in inferred.text_annotations:
+        if ta.annotation_type == music_pb2.NoteSequence.TextAnnotation.CHORD_SYMBOL:
+            chord_events.append((float(ta.time), ta.text))
+    chord_events.sort(key=lambda item: item[0])
+
+    total_steps = _estimate_total_steps(note_sequence, spq, steps_per_bar)
+    total_bars = max(1, int(math.ceil(total_steps / steps_per_bar)))
     total_steps = total_bars * steps_per_bar
 
-    step_pitches = _collect_step_pitches(notes, total_steps)
+    chord_by_step = _spread_chords(chord_events, total_steps, spq, note_sequence)
     prog_grid: List[List[str]] = []
 
     for bar_idx in range(total_bars):
@@ -64,11 +104,8 @@ def extract_chord_grid(
         prev_token = None
         bar_start_step = bar_idx * steps_per_bar
         for step in range(steps_per_bar):
-            step_idx = bar_start_step + step
-            pitches = step_pitches[step_idx]
-            token = "N.C."
-            if pitches:
-                token = pitches_to_roman(pitches, key_obj)
+            chord_symbol = chord_by_step[bar_start_step + step]
+            token = chord_symbol_to_roman(chord_symbol, key_name)
             if token == prev_token and token != "N.C.":
                 bar_tokens.append("-")
             else:
@@ -79,53 +116,135 @@ def extract_chord_grid(
     return prog_grid
 
 
-def _collect_step_pitches(notes, total_steps: int) -> List[List[int]]:
-    start_events: List[List[int]] = [[] for _ in range(total_steps + 1)]
-    end_events: List[List[int]] = [[] for _ in range(total_steps + 1)]
-    for note in notes:
-        start = max(0, int(note.quantized_start_step))
-        end = max(start, int(note.quantized_end_step))
-        if end <= start:
-            continue
-        if start < total_steps:
-            start_events[start].append(int(note.pitch))
-        if end < total_steps:
-            end_events[end].append(int(note.pitch))
+def _estimate_total_steps(note_sequence, steps_per_quarter: int, steps_per_bar: int) -> int:
+    if getattr(note_sequence, "notes", None):
+        end_steps = [getattr(n, "quantized_end_step", None) for n in note_sequence.notes]
+        end_steps = [s for s in end_steps if s is not None]
+        if end_steps:
+            return max(end_steps)
+    total_time = float(getattr(note_sequence, "total_time", 0.0))
+    qpm = _get_qpm(note_sequence)
+    steps_per_second = (qpm / 60.0) * steps_per_quarter
+    return max(steps_per_bar, int(round(total_time * steps_per_second)))
 
-    active: Dict[int, int] = {}
-    step_pitches: List[List[int]] = []
+
+def _spread_chords(chord_events, total_steps: int, steps_per_quarter: int, note_sequence):
+    chord_by_step = [None] * total_steps
+    if not chord_events:
+        return chord_by_step
+
+    qpm = _get_qpm(note_sequence)
+    steps_per_second = (qpm / 60.0) * steps_per_quarter
+
+    events = []
+    for time, symbol in chord_events:
+        step = int(round(time * steps_per_second))
+        step = max(0, min(step, total_steps - 1))
+        events.append((step, symbol))
+    events.sort(key=lambda item: item[0])
+
+    current_symbol = None
+    event_idx = 0
     for step in range(total_steps):
-        for pitch in start_events[step]:
-            active[pitch] = active.get(pitch, 0) + 1
-        for pitch in end_events[step]:
-            count = active.get(pitch, 0) - 1
-            if count <= 0:
-                active.pop(pitch, None)
-            else:
-                active[pitch] = count
-        step_pitches.append(list(active.keys()))
+        while event_idx < len(events) and events[event_idx][0] <= step:
+            current_symbol = events[event_idx][1]
+            event_idx += 1
+        chord_by_step[step] = current_symbol
 
-    return step_pitches
+    return chord_by_step
 
 
-def pitches_to_roman(pitches: List[int], key_obj) -> str:
-    try:
-        chord_obj = m21chord.Chord(sorted(set(pitches)))
-        rn = m21roman.romanNumeralFromChord(chord_obj, key_obj)
-        figure = rn.figure.replace(" ", "")
-        return simplify_roman(figure)
-    except Exception:
+def _get_qpm(note_sequence) -> float:
+    tempos = getattr(note_sequence, "tempos", [])
+    if tempos:
+        tempo = min(tempos, key=lambda t: t.time)
+        return float(tempo.qpm)
+    return 120.0
+
+
+def chord_symbol_to_roman(chord_symbol: str | None, key_name: str) -> str:
+    if not chord_symbol or chord_symbol == "N.C.":
         return "N.C."
 
+    root, quality, has_seventh = _parse_chord_symbol(chord_symbol)
+    if root is None:
+        return chord_symbol
 
-def simplify_roman(figure: str) -> str:
-    parts = figure.split("/")
-    simplified = []
-    for part in parts:
-        digits = re.findall(r"\d+", part)
-        keep_seventh = any("7" in d for d in digits)
-        part = re.sub(r"\d+", "", part)
-        if keep_seventh:
-            part = f"{part}7"
-        simplified.append(part)
-    return "/".join(simplified)
+    key_semitone, mode = parse_key_name(key_name)
+    if key_semitone is None or mode is None:
+        return chord_symbol
+
+    root_semitone = _NOTE_NAME_TO_SEMITONE.get(root)
+    if root_semitone is None:
+        return chord_symbol
+
+    scale_degrees = _SCALE_DEGREES_MAJOR if mode == "MAJOR" else _SCALE_DEGREES_MINOR
+    degree_idx, accidental = _degree_from_semitone(root_semitone, key_semitone, scale_degrees)
+    if degree_idx is None:
+        return chord_symbol
+
+    roman = _ROMAN_BASE[degree_idx]
+    if quality in ("min", "dim"):
+        roman = roman.lower()
+    if accidental:
+        roman = f"{accidental}{roman}"
+    if quality == "dim":
+        roman = f"{roman}o"
+    elif quality == "aug":
+        roman = f"{roman}+"
+    if has_seventh:
+        roman = f"{roman}7"
+    return roman
+
+
+def _parse_chord_symbol(symbol: str):
+    symbol = symbol.strip()
+    if not symbol or symbol == "N.C.":
+        return None, None, False
+    root_part = symbol
+    if ":" in symbol:
+        root_part, qual = symbol.split(":", 1)
+    else:
+        root_part, qual = symbol, ""
+    if "/" in root_part:
+        root_part = root_part.split("/", 1)[0]
+    if "/" in qual:
+        qual = qual.split("/", 1)[0]
+
+    match = re.match(r"^([A-G](?:#|b)?)(.*)$", root_part.strip())
+    if match:
+        root = match.group(1)
+        remainder = match.group(2)
+        qual = f"{remainder}{qual}"
+    else:
+        match = re.match(r"^([A-G](?:#|b)?)(.*)$", symbol)
+        if not match:
+            return None, None, False
+        root = match.group(1)
+        qual = match.group(2)
+
+    qual_lower = qual.lower()
+    has_seventh = "7" in qual_lower
+
+    if "dim" in qual_lower or "o" in qual_lower:
+        quality = "dim"
+    elif "aug" in qual_lower or "+" in qual:
+        quality = "aug"
+    elif "min" in qual_lower or (qual_lower.startswith("m") and not qual_lower.startswith("maj")):
+        quality = "min"
+    else:
+        quality = "maj"
+
+    return root, quality, has_seventh
+
+
+def _degree_from_semitone(root: int, key_root: int, scale_degrees: List[int]):
+    diff = (root - key_root) % 12
+    if diff in scale_degrees:
+        return scale_degrees.index(diff), ""
+    for idx, degree in enumerate(scale_degrees):
+        if (degree + 1) % 12 == diff:
+            return idx, "#"
+        if (degree - 1) % 12 == diff:
+            return idx, "b"
+    return None, ""

@@ -50,7 +50,7 @@ def bundle_to_text(bundle: Dict) -> str:
 def format_prog_grid(prog_grid: List[List[str]]) -> List[str]:
     lines: List[str] = []
     for bar in prog_grid:
-        token_str = " ".join(bar)
+        token_str = " ".join(_compress_bar_tokens(bar))
         lines.append(f"| {token_str} |")
     return lines
 
@@ -59,3 +59,29 @@ def _format_form_entry(entry: Tuple[str, int]) -> str:
     if isinstance(entry, tuple) and len(entry) == 2:
         return f"{entry[0]}({entry[1]})"
     return str(entry)
+
+
+def _compress_bar_tokens(bar: List[str]) -> List[str]:
+    compressed: List[str] = []
+    idx = 0
+    while idx < len(bar):
+        token = bar[idx]
+        if token == "-":
+            run = 1
+            idx += 1
+            while idx < len(bar) and bar[idx] == "-":
+                run += 1
+                idx += 1
+            compressed.append(f"-:{run}")
+            continue
+        run = 1
+        next_idx = idx + 1
+        while next_idx < len(bar) and bar[next_idx] == "-":
+            run += 1
+            next_idx += 1
+        if run > 1:
+            compressed.append(f"{token}:{run}")
+        else:
+            compressed.append(token)
+        idx = next_idx
+    return compressed

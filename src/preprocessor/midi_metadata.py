@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Tuple
 
-from music21 import key as m21key
-
 log = logging.getLogger(__name__)
 
 DEFAULT_BPM = 120
@@ -54,31 +52,13 @@ def get_time_signature(note_sequence) -> Tuple[int, int]:
     return DEFAULT_TIME_SIGNATURE
 
 
-def get_key_from_sequence(note_sequence) -> m21key.Key | None:
+def get_key_from_sequence(note_sequence) -> str | None:
     if getattr(note_sequence, "key_signatures", None):
         ks = min(note_sequence.key_signatures, key=lambda k: k.time)
         tonic = _KEY_INDEX_TO_NAME[int(ks.key) % 12]
         mode = _KEY_MODE_MAP.get(int(ks.mode), "MAJOR")
-        try:
-            return m21key.Key(tonic, mode.lower())
-        except Exception:
-            log.warning("Key signature parse failed; falling back to analysis")
-            return None
+        return f"{tonic}_{mode}"
     return None
-
-
-def infer_key(m21_stream) -> m21key.Key:
-    try:
-        return m21_stream.analyze("key")
-    except Exception:
-        log.warning("Key analysis failed; using default %s", DEFAULT_KEY)
-        return m21key.Key("C")
-
-
-def format_key(key_obj: m21key.Key) -> str:
-    tonic_name = normalize_pitch_name(key_obj.tonic.name)
-    mode = key_obj.mode.upper()
-    return f"{tonic_name}_{mode}"
 
 
 def normalize_pitch_name(name: str) -> str:

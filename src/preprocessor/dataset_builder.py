@@ -4,35 +4,31 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 
-from music21 import converter as m21converter
-
 try:
     from .chord_progression import extract_chord_grid
     from .exporter import bundle_to_text
     from .instrument_roles import infer_instrument_roles
+    from .key_detection import detect_key, update_key_signature
     from .midi_metadata import (
         DEFAULT_BPM,
         DEFAULT_KEY,
         DEFAULT_TIME_SIGNATURE,
-        format_key,
         get_key_from_sequence,
         get_tempo_bpm,
         get_time_signature,
-        infer_key,
     )
 except ImportError:  # Allows running as a script without package context.
     from chord_progression import extract_chord_grid
     from exporter import bundle_to_text
     from instrument_roles import infer_instrument_roles
+    from key_detection import detect_key, update_key_signature
     from midi_metadata import (
         DEFAULT_BPM,
         DEFAULT_KEY,
         DEFAULT_TIME_SIGNATURE,
-        format_key,
         get_key_from_sequence,
         get_tempo_bpm,
         get_time_signature,
-        infer_key,
     )
 
 log = logging.getLogger(__name__)
@@ -61,15 +57,14 @@ def build_conductor_bundle(
     ts_num, ts_den = get_time_signature(note_sequence)
     time_sig = f"{ts_num}/{ts_den}"
 
-    key_obj = get_key_from_sequence(note_sequence)
-    if key_obj is None:
-        m21_stream = m21converter.parse(str(midi_path))
-        key_obj = infer_key(m21_stream)
-    key_str = format_key(key_obj)
+    detected_key = detect_key(note_sequence)
+    key_str = detected_key or get_key_from_sequence(note_sequence) or DEFAULT_KEY
+    if detected_key:
+        update_key_signature(note_sequence, detected_key)
 
     prog_grid = extract_chord_grid(
         note_sequence,
-        key_obj,
+        key_str,
         (ts_num, ts_den),
         grid_unit,
     )
