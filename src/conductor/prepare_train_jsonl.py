@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("train.jsonl"),
+        default=Path("data/processed/llama/train.jsonl"),
         help="Output JSONL path.",
     )
     parser.add_argument(

@@ -227,3 +227,5 @@ lightning_logs/
 tokenizer.json
 composer_map.json
 result/
+
+unsloth_compiled_cache/
