@@ -19,3 +19,7 @@ pretty_midi
 music21
 scikit-learn
 note_seq
+unsloth
+trl
+peft
+bitsandbytes

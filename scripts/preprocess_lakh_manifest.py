@@ -2,6 +2,7 @@ import argparse
 import csv
 import hashlib
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -12,6 +13,9 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 INVALID_PATH_CHARS = set('<>:"/\\|?*')
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 def _safe_name(value: str) -> str:
@@ -42,6 +46,21 @@ def _make_progress(enabled: bool, total=None, desc="Processing"):
     if not enabled or tqdm is None:
         return None
     return tqdm(total=total, desc=desc, unit="file")
+
+
+def _check_dependencies() -> tuple[bool, str]:
+    try:
+        import note_seq  # noqa: F401
+    except Exception as exc:
+        return False, f"note_seq import failed: {exc}"
+    try:
+        from src.preprocessor import dataset_builder as _db  # noqa: F401
+    except Exception:
+        try:
+            from preprocessor import dataset_builder as _db  # noqa: F401
+        except Exception as exc:
+            return False, f"dataset_builder import failed: {exc}"
+    return True, ""
 
 
 def _count_manifest_rows(path: Path) -> int:
@@ -201,6 +220,12 @@ def main():
         default=0,
         help="Optional cap on the number of rows to process (0 = no limit).",
     )
+    parser.add_argument(
+        "--error-sample",
+        type=int,
+        default=5,
+        help="Print up to N unique error messages at the end (0 disables).",
+    )
 
     args = parser.parse_args()
 
@@ -213,6 +238,13 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     source_root = Path(args.source_root) if args.source_root else None
+
+    deps_ok, deps_error = _check_dependencies()
+    if not deps_ok:
+        print("Error: missing or broken dependencies.")
+        print(deps_error)
+        print("Hint: install requirements (e.g., pip install note_seq).")
+        return 1
 
     output_manifest = Path(args.output_manifest) if args.output_manifest else None
     if output_manifest:
@@ -428,10 +460,31 @@ def main():
     ok_count = sum(1 for r in results if r["status"] == "ok")
     skip_count = sum(1 for r in results if r["status"] == "skipped")
     err_count = sum(1 for r in results if r["status"] == "error")
+    missing_count = sum(1 for r in results if r["status"] == "missing")
     print(f"Done. ok={ok_count}, skipped={skip_count}, error={err_count}")
+    if missing_count:
+        print(f"Missing rows: {missing_count}")
     if output_manifest:
         print(f"Output manifest saved to: {output_manifest}")
     print(f"Output directory: {output_dir}")
+
+    if args.error_sample and err_count:
+        seen = set()
+        samples = []
+        for row in results:
+            if row["status"] != "error":
+                continue
+            err = row.get("error") or ""
+            if not err or err in seen:
+                continue
+            seen.add(err)
+            samples.append(err)
+            if len(samples) >= args.error_sample:
+                break
+        if samples:
+            print("Sample errors:")
+            for err in samples:
+                print(f"- {err}")
 
     return 0
 
