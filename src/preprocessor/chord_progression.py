@@ -13,6 +13,10 @@ except ImportError:  # Script execution fallback.
 _SCALE_DEGREES_MAJOR = [0, 2, 4, 5, 7, 9, 11]
 _SCALE_DEGREES_MINOR = [0, 2, 3, 5, 7, 8, 10]
 _ROMAN_BASE = ["I", "II", "III", "IV", "V", "VI", "VII"]
+_SHARP_KEYS_MAJOR = {"G", "D", "A", "E", "B", "F#", "C#"}
+_FLAT_KEYS_MAJOR = {"F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb"}
+_SHARP_KEYS_MINOR = {"E", "B", "F#", "C#", "G#", "D#", "A#"}
+_FLAT_KEYS_MINOR = {"D", "G", "C", "F", "Bb", "Eb", "Ab"}
 
 _NOTE_NAME_TO_SEMITONE = {
     "C": 0,
@@ -179,7 +183,13 @@ def chord_symbol_to_roman(chord_symbol: str | None, key_name: str) -> str:
         return chord_symbol
 
     scale_degrees = _SCALE_DEGREES_MAJOR if mode == "MAJOR" else _SCALE_DEGREES_MINOR
-    degree_idx, accidental = _degree_from_semitone(root_semitone, key_semitone, scale_degrees)
+    prefer_accidental = _accidental_preference(key_name, mode)
+    degree_idx, accidental = _degree_from_semitone(
+        root_semitone,
+        key_semitone,
+        scale_degrees,
+        prefer_accidental=prefer_accidental,
+    )
     if degree_idx is None:
         return chord_symbol
 
@@ -238,13 +248,46 @@ def _parse_chord_symbol(symbol: str):
     return root, quality, has_seventh
 
 
-def _degree_from_semitone(root: int, key_root: int, scale_degrees: List[int]):
+def _accidental_preference(key_name: str, mode: str | None) -> str | None:
+    if not key_name:
+        return None
+    root = key_name.split("_", 1)[0].strip().replace("-", "b")
+    if "b" in root:
+        return "b"
+    if "#" in root:
+        return "#"
+    if mode == "MAJOR":
+        if root in _FLAT_KEYS_MAJOR:
+            return "b"
+        if root in _SHARP_KEYS_MAJOR:
+            return "#"
+    elif mode == "MINOR":
+        if root in _FLAT_KEYS_MINOR:
+            return "b"
+        if root in _SHARP_KEYS_MINOR:
+            return "#"
+    return None
+
+
+def _degree_from_semitone(
+    root: int,
+    key_root: int,
+    scale_degrees: List[int],
+    prefer_accidental: str | None = None,
+):
     diff = (root - key_root) % 12
     if diff in scale_degrees:
         return scale_degrees.index(diff), ""
+    candidates = []
     for idx, degree in enumerate(scale_degrees):
         if (degree + 1) % 12 == diff:
-            return idx, "#"
+            candidates.append((idx, "#"))
         if (degree - 1) % 12 == diff:
-            return idx, "b"
+            candidates.append((idx, "b"))
+    if prefer_accidental in ("#", "b"):
+        for candidate in candidates:
+            if candidate[1] == prefer_accidental:
+                return candidate
+    if candidates:
+        return candidates[0]
     return None, ""
