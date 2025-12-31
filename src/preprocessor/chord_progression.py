@@ -10,14 +10,6 @@ try:
 except ImportError:  # Script execution fallback.
     from key_detection import parse_key_name
 
-_SCALE_DEGREES_MAJOR = [0, 2, 4, 5, 7, 9, 11]
-_SCALE_DEGREES_MINOR = [0, 2, 3, 5, 7, 8, 10]
-_ROMAN_BASE = ["I", "II", "III", "IV", "V", "VI", "VII"]
-_SHARP_KEYS_MAJOR = {"G", "D", "A", "E", "B", "F#", "C#"}
-_FLAT_KEYS_MAJOR = {"F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb"}
-_SHARP_KEYS_MINOR = {"E", "B", "F#", "C#", "G#", "D#", "A#"}
-_FLAT_KEYS_MINOR = {"D", "G", "C", "F", "Bb", "Eb", "Ab"}
-
 _NOTE_NAME_TO_SEMITONE = {
     "C": 0,
     "C#": 1,
@@ -37,6 +29,20 @@ _NOTE_NAME_TO_SEMITONE = {
     "Bb": 10,
     "B": 11,
 }
+_SEMITONE_TO_NAME_FLAT = [
+    "C",
+    "Db",
+    "D",
+    "Eb",
+    "E",
+    "F",
+    "Gb",
+    "G",
+    "Ab",
+    "A",
+    "Bb",
+    "B",
+]
 
 
 def parse_fraction(text: str) -> Fraction:
@@ -109,7 +115,7 @@ def extract_chord_grid(
         bar_start_step = bar_idx * steps_per_bar
         for step in range(steps_per_bar):
             chord_symbol = chord_by_step[bar_start_step + step]
-            token = chord_symbol_to_roman(chord_symbol, key_name)
+            token = chord_symbol_to_absolute(chord_symbol, key_name)
             if token == prev_token and token != "N.C.":
                 bar_tokens.append("-")
             else:
@@ -166,7 +172,7 @@ def _get_qpm(note_sequence) -> float:
     return 120.0
 
 
-def chord_symbol_to_roman(chord_symbol: str | None, key_name: str) -> str:
+def chord_symbol_to_absolute(chord_symbol: str | None, key_name: str) -> str:
     if not chord_symbol or chord_symbol == "N.C.":
         return "N.C."
 
@@ -174,37 +180,17 @@ def chord_symbol_to_roman(chord_symbol: str | None, key_name: str) -> str:
     if root is None:
         return chord_symbol
 
-    key_semitone, mode = parse_key_name(key_name)
-    if key_semitone is None or mode is None:
-        return chord_symbol
-
     root_semitone = _NOTE_NAME_TO_SEMITONE.get(root)
     if root_semitone is None:
         return chord_symbol
 
-    scale_degrees = _SCALE_DEGREES_MAJOR if mode == "MAJOR" else _SCALE_DEGREES_MINOR
-    prefer_accidental = _accidental_preference(key_name, mode)
-    degree_idx, accidental = _degree_from_semitone(
-        root_semitone,
-        key_semitone,
-        scale_degrees,
-        prefer_accidental=prefer_accidental,
-    )
-    if degree_idx is None:
-        return chord_symbol
+    key_semitone, _ = parse_key_name(key_name)
+    if key_semitone is None:
+        key_semitone = 0
 
-    roman = _ROMAN_BASE[degree_idx]
-    if quality in ("min", "dim"):
-        roman = roman.lower()
-    if accidental:
-        roman = f"{accidental}{roman}"
-    if quality == "dim":
-        roman = f"{roman}o"
-    elif quality == "aug":
-        roman = f"{roman}+"
-    if has_seventh:
-        roman = f"{roman}7"
-    return roman
+    transposed = (root_semitone - key_semitone) % 12
+    root_name = _SEMITONE_TO_NAME_FLAT[transposed]
+    return _format_chord_token(root_name, quality, has_seventh)
 
 
 def _parse_chord_symbol(symbol: str):
@@ -248,46 +234,14 @@ def _parse_chord_symbol(symbol: str):
     return root, quality, has_seventh
 
 
-def _accidental_preference(key_name: str, mode: str | None) -> str | None:
-    if not key_name:
-        return None
-    root = key_name.split("_", 1)[0].strip().replace("-", "b")
-    if "b" in root:
-        return "b"
-    if "#" in root:
-        return "#"
-    if mode == "MAJOR":
-        if root in _FLAT_KEYS_MAJOR:
-            return "b"
-        if root in _SHARP_KEYS_MAJOR:
-            return "#"
-    elif mode == "MINOR":
-        if root in _FLAT_KEYS_MINOR:
-            return "b"
-        if root in _SHARP_KEYS_MINOR:
-            return "#"
-    return None
-
-
-def _degree_from_semitone(
-    root: int,
-    key_root: int,
-    scale_degrees: List[int],
-    prefer_accidental: str | None = None,
-):
-    diff = (root - key_root) % 12
-    if diff in scale_degrees:
-        return scale_degrees.index(diff), ""
-    candidates = []
-    for idx, degree in enumerate(scale_degrees):
-        if (degree + 1) % 12 == diff:
-            candidates.append((idx, "#"))
-        if (degree - 1) % 12 == diff:
-            candidates.append((idx, "b"))
-    if prefer_accidental in ("#", "b"):
-        for candidate in candidates:
-            if candidate[1] == prefer_accidental:
-                return candidate
-    if candidates:
-        return candidates[0]
-    return None, ""
+def _format_chord_token(root_name: str, quality: str | None, has_seventh: bool) -> str:
+    suffix = ""
+    if quality == "min":
+        suffix = "m"
+    elif quality == "dim":
+        suffix = "dim"
+    elif quality == "aug":
+        suffix = "aug"
+    if has_seventh:
+        suffix = f"{suffix}7" if suffix else "7"
+    return f"{root_name}{suffix}"

@@ -8,7 +8,17 @@ def bundle_to_text(bundle: Dict) -> str:
 
     global_meta = bundle.get("global", {})
     lines.append("[GLOBAL]")
-    for key in ["BPM", "KEY", "TIME_SIG", "GRID_UNIT", "GENRE", "STYLE"]:
+    for key in [
+        "BPM",
+        "KEY",
+        "TIME_SIG",
+        "GRID_UNIT",
+        "GENRE",
+        "STYLE",
+        "TITLE",
+        "ARTIST",
+        "COMPOSER",
+    ]:
         value = global_meta.get(key)
         if value is not None:
             lines.append(f"{key}={value}")
