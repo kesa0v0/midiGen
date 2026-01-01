@@ -25,6 +25,7 @@ import torch
 from datasets import load_dataset
 
 from unsloth import FastLanguageModel
+from transformers import TrainerCallback
 # from transformers import TrainingArguments
 from trl import SFTTrainer, SFTConfig
 
@@ -40,6 +41,22 @@ ALPACA_TEMPLATE = """### Instruction:
 
 ### Response:
 {output}"""
+
+
+class SaveLoRACallback(TrainerCallback):
+    def __init__(self, model, tokenizer, save_every_steps: int, base_dir: str) -> None:
+        self.model = model
+        self.tokenizer = tokenizer
+        self.save_every_steps = save_every_steps
+        self.base_dir = base_dir
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step > 0 and state.global_step % self.save_every_steps == 0:
+            step_dir = os.path.join(self.base_dir, f"lora_adapter_step_{state.global_step}")
+            os.makedirs(step_dir, exist_ok=True)
+            self.model.save_pretrained(step_dir)
+            self.tokenizer.save_pretrained(step_dir)
+        return control
 
 
 def format_alpaca_example(example: Dict[str, Any], eos_token: str) -> Dict[str, str]:
@@ -85,6 +102,8 @@ def main():
                         help="Context length for training/inference")
     parser.add_argument("--max_steps", type=int, default=100,
                         help="MVP test steps (나중에 늘리려면 값 변경)")
+    parser.add_argument("--num_train_epochs", type=float, default=None,
+                        help="If set, train for this many epochs (overrides max_steps).")
     # parser.add_argument("--max_steps", type=int, default=1000, help="(예) 본학습용으로 늘릴 때")
 
     parser.add_argument("--save_steps", type=int, default=25,
@@ -152,36 +171,32 @@ def main():
     # -------------------------
     # Trainer (SFTTrainer) config
     # -------------------------
-    sft_config = SFTConfig(
-    output_dir=outputs_dir,
-
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=4,
-
-    warmup_steps=5,
-    max_steps=args.max_steps,   # MVP: 100 (나중에 늘리기)
-
-    learning_rate=2e-4,
-    fp16=False,
-    bf16=True,                 # RTX 40xx
-
-    optim="adamw_8bit",
-    weight_decay=0.01,
-
-    logging_steps=1,
-
-    # 중간 체크포인트
-    save_strategy="steps",
-    save_steps=args.save_steps,
-    save_total_limit=args.save_total_limit,
-
-    # Unsloth psutil 경로를 타지 않도록 명시 (중요)
-    dataset_num_proc=1,
-
-    # 기타
-    report_to="none",
-    seed=42,
+    kwargs = dict(
+        output_dir=outputs_dir,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=4,
+        warmup_steps=5,
+        learning_rate=2e-4,
+        fp16=False,
+        bf16=True,
+        optim="adamw_8bit",
+        weight_decay=0.01,
+        logging_steps=1,
+        save_strategy="no",
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
+        dataset_num_proc=1,
+        report_to="none",
+        seed=42,
     )
+
+    if args.num_train_epochs is not None:
+        kwargs["num_train_epochs"] = args.num_train_epochs
+        # max_steps를 지정하면 epochs가 무시될 수 있으므로 넣지 않음
+    else:
+        kwargs["max_steps"] = args.max_steps
+
+    sft_config = SFTConfig(**kwargs)
 
     trainer = SFTTrainer(
         model=model,
@@ -191,6 +206,14 @@ def main():
         max_seq_length=args.max_seq_length,
         args=sft_config,
         packing=False,
+    )
+    trainer.add_callback(
+        SaveLoRACallback(
+            model,
+            tokenizer,
+            save_every_steps=args.save_steps,
+            base_dir=base_dir,
+        )
     )
 
     # -------------------------

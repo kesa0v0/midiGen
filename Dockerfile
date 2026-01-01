@@ -12,8 +12,6 @@ WORKDIR /workspace
 
 COPY requirements.txt .
 
-RUN pip install -r requirements.txt
-
 RUN pip install mamba-ssm causal-conv1d --no-binary mamba-ssm,causal-conv1d --no-build-isolation
 
 RUN pip install -r requirements.txt && pip uninstall -y torchao || true

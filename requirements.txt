@@ -8,7 +8,7 @@ datasets
 miditok
 pandas
 transformers
-titans-pytorch
+# titans-pytorch
 accelerate
 pytorch-lightning
 flash-attn
